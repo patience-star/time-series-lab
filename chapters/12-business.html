@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>12 业务实战与模型竞技场 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="12">
+<main>
+<p class="lead">前面十一章学了一堆方法。这一章把它们放回业务里：先在<strong>模型竞技场</strong>让所有模型用同一套回测规则同台比较，再看四个典型的业务案例——预测值怎么变成补货量、协变量值多少钱、怎么用预测做监控告警、怎么评估一次促销的真实增量。最后是选型指南和上线清单。</p>
+
+<section id="arena">
+<h2>模型竞技场</h2>
+<p>规则只有一条：<strong>所有模型面对完全相同的滚动回测</strong>（第 05 章）——同样的预测起点、同样的步长、同样的评估指标，评分对照的永远是干净的真实值。所有模型都在你的浏览器里现场训练。</p>
+<div class="demo" id="arena-demo">
+  <div class="demo-title">🏟 模型竞技场</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="readout"></div>
+    <div class="chart-cap">误差随"提前多少步预测"的变化</div>
+    <div class="chart" data-h="250"></div>
+    <div class="chart-cap">单折预测对比</div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">点"开始回测"（全部模型跑完大约需要几秒到十几秒，LSTM 最慢）。建议做三组对比：① 三份数据各跑一次——<strong>没有哪个模型在所有数据上都赢</strong>：有促销计划的电商销量上，用了促销特征的岭回归 / GBDT 占优；规律稳定的日活上，统计模型就很好；有气温协变量的负荷上，特征模型领先。② 电商销量或日活切到"脏数据直接用"——误差成倍上升，而且最依赖近期滞后特征的模型（岭回归、GBDT、LSTM）摔得最重；再切到"清洗后"，误差基本回到干净数据的水平：<strong>数据质量带来的差距，常常大于模型之间的差距</strong>。③ 把预测步长调长，看谁的误差上升得最快。</p>
+  </div>
+</div>
+<div class="callout key"><div class="hd">怎么读排行榜</div>
+<ul>
+  <li><strong>MASE &lt; 1</strong> 才算打败了季节朴素法；差不多的话，选更简单的那个。</li>
+  <li><strong>Bias</strong> 看系统性偏差：缺货代价高的业务宁可略微高估。</li>
+  <li><strong>耗时</strong>在这里是毫秒级的小数字，但成千上万条序列每天重跑时就是真金白银。</li>
+  <li>差距小于"各折之间的波动"时，不要过度解读名次——换一段时间回测，名次可能就变了。</li>
+  <li>这里的 LSTM 只在第一个预测起点之前训练一次、之后不再更新，且只有一条序列可学，处于它最不利的条件下（第 10 章）。</li>
+</ul></div>
+</section>
+
+<section id="inventory">
+<h2>案例一：电商补货——预测值如何变成订货量</h2>
+<div class="callout biz"><div class="hd">💼 业务问题</div><p>商品从下单到入库需要 L 天（<strong>提前期</strong>）。今天要决定：库存降到多少时必须下单（<strong>再订货点</strong>）？答案 = 提前期内的预测需求 + <strong>安全库存</strong>。安全库存是为"预测会出错"买的保险——所以它的大小取决于<strong>预测误差有多大</strong>，而不是需求本身有多大。</p></div>
+$$\text{再订货点} = \underbrace{\sum_{j=1}^{L}\hat y_{T+j}}_{\text{提前期内的预测需求}} + \underbrace{z_{\alpha}\cdot\sigma_L}_{\text{安全库存}}$$
+<p>$\sigma_L$ 是"提前期内<strong>累计</strong>预测误差"的标准差，$z_\alpha$ 是目标服务水平对应的正态分位数（95% → 1.64，99% → 2.33）。$\sigma_L$ 应该从滚动回测里直接量出来。</p>
+<div class="demo" id="inv-demo">
+  <div class="demo-title">🧪 安全库存计算器（误差来自滚动回测）</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">提前期内累计预测误差的分布（正 = 实际需求超过预测）</div><div class="chart" data-h="240"></div></div>
+      <div><div class="chart-cap">服务水平越高，安全库存涨得越快</div><div class="chart" data-h="240"></div></div>
+    </div>
+    <div class="readout"></div>
+    <p class="hint">① 把服务水平从 95% 拉到 99%：安全库存不是多 4%，而是多出一大截——最后几个百分点的服务水平非常昂贵。② 留意"按 √L 推算"和"回测实测"的差别：教科书公式 σ<sub>L</sub> = σ<sub>日</sub>·√L 假设每天的预测误差互相独立，但真实的误差是相关的（今天低估，明天多半也低估），所以它常常<strong>低估</strong>风险。③ 取消"排除大促窗口"：误差分布出现极端值，安全库存暴涨——大促应该单独做备货计划，而不是让日常的安全库存去覆盖它。</p>
+  </div>
+</div>
+</section>
+
+<section id="loadcase">
+<h2>案例二：电力负荷——一个好协变量值多少</h2>
+<div class="callout biz"><div class="hd">💼 业务问题</div><p>电网调度每天要预测<strong>第二天 24 小时</strong>的负荷（日前预测），据此安排机组和购电。夏季负荷高度依赖气温——而气温有天气预报可用。把气温加进模型，值不值？</p></div>
+<div class="demo" id="load-demo">
+  <div class="demo-title">🧪 实验：加不加气温</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">下午 3 点：气温与负荷的关系</div><div class="chart" data-h="220"></div></div>
+      <div class="readout" style="margin-top:28px"></div>
+    </div>
+    <p class="hint">两个模型都是 GBDT，都只使用 24 小时之前的负荷（日前预测拿不到当天的数据），区别只在于有没有"预测日的气温"这一列。没有气温时，模型只能假设明天和前几天差不多，遇到升温或降温就会系统性偏差；有了气温，峰值预测明显改善。左下的散点图解释了原因：气温超过约 26°C 后负荷随气温近似线性上升——这种"拐弯"的关系正是树模型擅长的。（这里用的是实际气温；真实场景用的是气温<em>预报</em>，预报误差会吃掉一部分收益。）</p>
+  </div>
+</div>
+</section>
+
+<section id="monitor">
+<h2>案例三：指标监控——用预测区间做动态阈值</h2>
+<div class="callout biz"><div class="hd">💼 业务问题</div><p>日活掉了多少才算异常？固定阈值（"日环比下跌超过 10% 就告警"）要么天天误报（周日到周一本来就会跌），要么阈值调宽后漏掉真问题。更好的做法：<strong>先预测今天"应该是多少"，实际值落在预测区间之外才告警。</strong></p></div>
+<div class="demo" id="mon-demo">
+  <div class="demo-title">🧪 实验：动态阈值 vs 固定阈值</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+    <p class="hint">灰色带子是模型对每一天的"一步预测 ± k 倍误差"。数据里有 4 个真实的异常日（3 次故障下跌、1 次异常上涨）和 2 次版本发布带来的台阶。① 把固定阈值调到 10%：每个周一都告警；调到 25%：误报没了，但也漏掉了一半异常，而且永远抓不到"异常上涨"。② 动态阈值 k = 3 左右：4 个异常全中，误报很少——剩下的误报主要是发版那两天（水平真的变了，属于"该知道的变化"）和故障的次日（模型的水平被故障值带偏了一点）。</p>
+  </div>
+</div>
+<div class="callout tip"><div class="hd">💡 落地时的细节</div>
+<ul>
+  <li><strong>异常值不要喂回模型</strong>：检测到异常后，用预测值代替它去更新模型状态，否则会连带误报后面几天。</li>
+  <li><strong>分级告警</strong>：超出 3σ 提醒、超出 5σ 电话，避免告警疲劳。</li>
+  <li><strong>已知事件要提前登记</strong>：发版、大促、节假日写进日历，让模型知道（或在那几天抑制告警）。</li>
+  <li>粒度越细噪声越大：分钟级监控常常要先聚合，或要求连续多个点越界才告警。</li>
+</ul></div>
+</section>
+
+<section id="promo">
+<h2>案例四：促销评估——这次活动到底多卖了多少</h2>
+<div class="callout biz"><div class="hd">💼 业务问题</div><p>活动复盘时最常见的算法是"活动期销量 − 活动前一周销量"。它有两个问题：没考虑<strong>即使不做活动，这几天本来也会卖多少</strong>（星期几、趋势都不一样）；没考虑活动<strong>透支</strong>了之后几天的需求。正确的做法是构造<strong>反事实基线</strong>：用模型估计"如果没有这次活动，销量会是多少"。</p></div>
+<div class="demo" id="promo-demo">
+  <div class="demo-title">🧪 实验：反事实基线与净增量</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">橙色虚线是反事实基线（把所有活动日当作"缺失"，用第 03 章的方法估计出每一天的正常水平：稳健趋势 × 星期指数）。绿色阴影是活动期，实际值高出基线的部分是<strong>毛增量</strong>；活动结束后几天实际值低于基线，是被提前透支的需求。<strong>净增量 = 毛增量 − 透支</strong>。默认选中的双 11 看得最清楚：当天的峰值很壮观，但前面的预热和后面的回落都要算进账里。最后一个指标对比了常见的土办法——它没有考虑星期和趋势，结果时高时低，换几次活动看看偏差有多不稳定。</p>
+  </div>
+</div>
+</section>
+
+<section id="choose">
+<h2>模型选型指南</h2>
+<p>回答下面几个问题，得到一个起步建议。它不能代替回测，但能帮你决定先试什么。</p>
+<div class="demo" id="choose-demo">
+  <div class="demo-title">🧭 选型问答</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="readout"></div>
+  </div>
+</div>
+</section>
+
+<section id="ops">
+<h2>上线之后：预测是一个持续运营的系统</h2>
+<p>模型在回测里表现好只是开始。点击查看每一项要做什么。</p>
+<div id="flow"></div>
+<div class="tw"><table>
+<thead><tr><th>上线检查清单</th><th>要点</th></tr></thead>
+<tbody>
+<tr><td>☐ 基线兜底</td><td>主模型出错（数据没到、训练失败、预测值离谱）时，自动回退到季节朴素法</td></tr>
+<tr><td>☐ 预测值合理性校验</td><td>非负、不超过历史最大值的若干倍、与昨天的预测相比没有无故剧变</td></tr>
+<tr><td>☐ 特征可得性</td><td>线上预测时每个特征真的能按时拿到吗？促销计划会不会晚于预测时间才录入？</td></tr>
+<tr><td>☐ 训练与预测用同一份代码</td><td>特征计算逻辑不一致是线上线下效果差距的首要来源</td></tr>
+<tr><td>☐ 保存每一次预测</td><td>连同当时的模型版本和输入数据快照，事后才能复盘"为什么那天预测错了"</td></tr>
+<tr><td>☐ 人工调整留痕</td><td>业务方可以改预测值，但必须记录原值、改后值和理由，定期评估改得对不对</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>没有永远最好的模型：用同一套滚动回测、和基线一起比，让数据说话。</li>
+  <li>数据质量和关键协变量带来的提升，常常大于换模型带来的提升。</li>
+  <li>安全库存取决于<strong>预测误差</strong>的大小，应从回测的累计误差中直接估计。</li>
+  <li>监控 = 预测 + 区间：实际值落在区间之外才告警。</li>
+  <li>评估促销要和反事实基线比，并扣除透支。</li>
+  <li>上线后要持续监控误差与偏差、定期重训、保留基线兜底。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/mllib.js"></script>
+<script src="../assets/js/nnlib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site, C = TS.clean;
+const RT = TS.data.retail();
+
+/* ==================== 模型竞技场 ==================== */
+const DATA = {
+  retail: { ds: RT, m: 7, end: 1060, hs: [[7, '7 天'], [14, '14 天'], [28, '28 天']], h: 14, cfg: { lags: [1, 7, 14, 28], roll: [7, 28], dow: true, promo: true, holiday: true, log: true }, win: 14, dirty: true },
+  dau: { ds: TS.data.dau(), m: 7, end: 540, hs: [[7, '7 天'], [14, '14 天'], [28, '28 天']], h: 14, cfg: { lags: [1, 7, 14], roll: [7], dow: true, log: true, rel: true }, win: 14, dirty: true },
+  load: { ds: TS.data.load(), m: 24, end: 1344, hs: [[24, '24 小时'], [48, '48 小时']], h: 24, cfg: { lags: [1, 24, 48, 168], roll: [24], phase: 24, dow: true, exog: ['temp'], log: true }, win: 24, dirty: false },
+};
+const MODELS = [['snaive', '季节朴素', 1], ['hw', 'Holt-Winters', 1], ['sarima', 'SARIMA', 1], ['ridge', '岭回归 + 特征', 1], ['gbdt', 'GBDT + 特征', 1], ['lstm', 'LSTM', 0]];
+const SLOT = { snaive: null, hw: 0, sarima: 1, ridge: 2, gbdt: 3, lstm: 6 };
+const KINDS = { miss: 1, block: 1, gap: 1, dup: 1, spike: 1, neg: 1, flat: 1, stockout: 1 };
+
+// 准备"工作序列"：干净 / 脏数据直接用（空值当 0）/ 清洗后。评分永远对照干净的真值
+function workSeries(D, quality) {
+  if (quality === 'clean' || !D.dirty) return D.ds.y;
+  const dz = TS.dirty(D.ds, KINDS, 5);
+  if (quality === 'dirty') return C.align(dz.rows, 'last').y.map(v => (Number.isFinite(v) ? v : 0));
+  const pl = C.pipeline(dz.rows, { m: D.m, stock: dz.stock, event: D.ds.event });
+  return pl.y.concat(D.ds.y.slice(pl.y.length)); // 若流水线截掉了尾部，补齐长度（竞技场的回测用不到最后这几天的训练值）
+}
+// 每个模型：给定工作序列 y、预测起点 cut、步长 h，返回预测数组
+function makeForecaster(key, D, y, wds) {
+  const m = D.m, pos = a => Math.min.apply(null, a) > 0;
+  if (key === 'snaive') return (cut, h) => TS.fc.snaive(y.slice(0, cut), h, m);
+  if (key === 'hw') return (cut, h) => { const tr = y.slice(Math.max(0, cut - 60 * m), cut); return TS.etsFit(tr, { trend: true, phi: 0.9, seasonal: pos(tr) ? 'mul' : 'add', m }).forecast(h).mean; };
+  if (key === 'sarima') return (cut, h) => { const tr = y.slice(Math.max(0, cut - Math.max(400, 20 * m)), cut), lg = pos(tr), f = TS.arima(lg ? tr.map(Math.log) : tr, { p: 1, d: 0, q: 1, P: 0, D: 1, Q: 1, s: m }).forecast(h).mean; return lg ? f.map(Math.exp) : f; };
+  if (key === 'ridge') return (cut, h) => { const c = Object.assign({ onehot: true }, D.cfg), d = ML.makeXY(wds, c, 0, cut, false); return ML.forecast(ML.ridge(d.X, d.y, 1), wds, c, cut, h); };
+  if (key === 'gbdt') return (cut, h) => { const d = ML.makeXY(wds, D.cfg, 0, cut, false); return ML.forecast(ML.gbdt(d.X, d.y, { nTrees: 120, lr: 0.08, maxDepth: 4, minLeaf: 8 }), wds, D.cfg, cut, h); };
+  return null;
+}
+// LSTM：只在第一个预测起点之前训练一次（每个 tick 训练一轮），之后各折直接预测
+function makeLstm(D, y, firstCut, h) {
+  const ly = y.map(v => Math.log(Math.max(v, 1))), sc = NN.scaler(ly.slice(0, firstCut)), z = ly.map(sc.f), win = D.win, X = [], Y = [], step = D.m === 24 ? 2 : 1;
+  for (let t = win; t + h <= firstCut; t += step) { X.push(z.slice(t - win, t).map(v => [v])); Y.push(z.slice(t, t + h)); }
+  const nv = Math.max(8, Math.round(X.length * 0.12)), tr = { X: X.slice(0, -nv), Y: Y.slice(0, -nv) }, va = { X: X.slice(-nv), Y: Y.slice(-nv) };
+  const model = NN.rnn({ nin: 1, nh: 12, nout: h, cell: 'lstm', seed: 3 }), opt = NN.adam(model, 0.01), rng = TS.rng(1);
+  let best = Infinity, bestW = null, ep = 0; const maxEp = D.m === 24 ? 14 : 30;
+  return {
+    epochs: maxEp,
+    trainStep() { NN.trainEpoch(model, opt, tr.X, tr.Y, { batch: 32, rng, clip: 2 }); const v = NN.mse(model, va.X, va.Y); if (v < best) { best = v; bestW = Float64Array.from(model.w); } ep++; if (ep >= maxEp) model.w.set(bestW); return ep < maxEp; },
+    forecast: (cut, hh) => model.predict(z.slice(cut - win, cut).map(v => [v])).slice(0, hh).map(v => Math.exp(sc.inv(v))),
+  };
+}
+
+Site.demo('arena-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'seg', options: [['retail', '电商销量'], ['dau', 'App 日活'], ['load', '电力负荷']] },
+    { k: 'q', label: '数据质量（销量 / 日活）', type: 'seg', options: [['clean', '干净'], ['dirty', '脏数据直接用'], ['fixed', '清洗后']] },
+    { k: 'hi', label: '预测步长', type: 'seg', options: [[0, '短'], [1, '中'], [2, '长']], value: 1 },
+    { k: 'folds', label: '回测折数', min: 3, max: 8, step: 1, value: 5 },
+    { k: 'models', type: 'checks', label: '参赛模型', options: MODELS },
+    { k: 'fold', label: '查看第几折', min: 1, max: 8, step: 1, value: 1 },
+    { act: 'run', label: '▶ 开始回测 / 停止', primary: true, run(s, d) {
+      const D = DATA[s.ds], h = D.hs[Math.min(s.hi, D.hs.length - 1)][0], y = workSeries(D, s.q), wds = Object.assign({}, D.ds, { y });
+      const cuts = Array.from({ length: s.folds }, (_, k) => D.end - h * (s.folds - k)), tasks = [];
+      s.run = { key: [s.ds, s.q, s.hi, s.folds].join('|'), D, h, cuts, y, res: {}, total: 0, done: 0, note: '' };
+      MODELS.forEach(([key, name]) => { if (!s.models[key]) return;
+        const R = s.run.res[key] = { name, folds: [], ms: 0 };
+        if (key === 'lstm') { const L = makeLstm(D, y, cuts[0], h); R.fc = L.forecast; for (let e = 0; e < L.epochs; e++) tasks.push({ key, train: L }); }
+        else R.fc = makeForecaster(key, D, y, wds);
+        cuts.forEach(cut => tasks.push({ key, cut }));
+      });
+      s.run.total = tasks.length;
+      d.loop('run', () => {
+        const t = tasks.shift(); if (!t) return false;
+        const R = s.run.res[t.key], t0 = performance.now();
+        try {
+          if (t.train) { if (!t.train.trainStep()) while (tasks.length && tasks[0].train) { tasks.shift(); s.run.done++; } s.run.note = 'LSTM 训练中…'; }
+          else { const pred = R.fc(t.cut, h), actual = D.ds.y.slice(t.cut, t.cut + h); R.folds.push({ cut: t.cut, pred, actual, metrics: TS.metrics(actual, pred, { train: D.ds.y.slice(0, t.cut), m: D.m }) }); s.run.note = R.name + ' 第 ' + R.folds.length + ' 折'; }
+        } catch (e) { R.error = e.message; }
+        R.ms += performance.now() - t0; s.run.done++;
+        d.draw(); return tasks.length > 0;
+      }, 0, () => { if (s.run) { s.run.note = ''; d.draw(); } });
+      return false;
+    } },
+  ],
+  render(s, d) {
+    const D = DATA[s.ds], p = Site.pal(), hOpt = D.hs[Math.min(s.hi, D.hs.length - 1)], key = [s.ds, s.q, s.hi, s.folds].join('|'), run = s.run && s.run.key === key ? s.run : null;
+    const head = `<div class="small muted" style="margin-bottom:6px">${D.ds.name}　步长 ${hOpt[1]}　${s.folds} 折` + (!D.dirty && s.q !== 'clean' ? '　（负荷数据只有干净版本）' : '') + '</div>';
+    if (!run) { d.out(head + '<span class="tag">设置好之后点"开始回测"</span>', 0); d.chart(0, { xAxis: { data: [] }, yAxis: {}, series: [] }); d.chart(1, { xAxis: { data: [] }, yAxis: {}, series: [] }); d.out('', 1); return; }
+    const h = run.h, keys = Object.keys(run.res), rows = keys.map(k => { const R = run.res[k], F = R.folds, avg = q => TS.mean(F.map(f => f.metrics[q]).filter(Number.isFinite)); return { k, R, n: F.length, mae: avg('mae'), wape: avg('wape'), mase: avg('mase'), bias: avg('bias') }; }).filter(r => r.n).sort((a, b) => a.mae - b.mae);
+    const prog = run.done < run.total ? `<span class="tag">进度 ${run.done} / ${run.total}　${run.note}</span>` : `<span class="tag good">完成：${keys.length} 个模型 × ${s.folds} 折</span>`;
+    d.out(head + prog + (rows.length ? Site.table(['名次', '模型', 'MAE（' + D.ds.unit + '）', 'WAPE', 'MASE', 'Bias', '已完成折数', '耗时'], rows.map((r, i) => [i + 1, r.R.name + (r.R.error ? ' <span class="tag bad">出错</span>' : ''), r.mae, Site.pct(r.wape), r.mase.toFixed(2), r.bias, r.n + ' / ' + s.folds, Math.round(r.R.ms) + ' ms']), { num: [2, 3, 4, 5, 7], hl: 0 }) : ''), 0);
+    const col = k => (SLOT[k] == null ? p.muted : p.s[SLOT[k]]), unitStep = D.m === 24 ? '小时' : '天';
+    d.chart(0, { xAxis: { data: Array.from({ length: h }, (_, i) => '第' + (i + 1) + unitStep) }, yAxis: { name: 'MAE' },
+      series: rows.map(r => S.line(r.R.name, Array.from({ length: h }, (_, i) => +TS.mean(r.R.folds.map(f => Math.abs(f.pred[i] - f.actual[i]))).toFixed(1)), { c: col(r.k), w: r.k === 'snaive' ? 1.3 : 2.2, dash: r.k === 'snaive' })) });
+    const fi = Math.min(s.fold, s.folds) - 1, cut = run.cuts[fi], v0 = cut - Math.min(cut, 3 * h), pad = new Array(cut - v0).fill(null);
+    const hist = S.line('训练用的数据', run.y.slice(v0, cut).concat(new Array(h).fill(null)), { c: p.muted, w: 1.2 }); hist.markLine = S.vline(D.ds.dates[cut], { label: '第 ' + (fi + 1) + ' 折起点' });
+    const ser = [hist, S.line('真实值', D.ds.y.slice(v0, cut + h), { c: p.ink, w: 1.6, op: 0.75 })];
+    rows.forEach(r => { const f = r.R.folds[fi]; if (f) ser.push(S.line(r.R.name, pad.concat(f.pred.map(v => +v.toFixed(1))), { c: col(r.k), w: r.k === 'snaive' ? 1.3 : 2, dash: r.k === 'snaive' })); });
+    d.chart(1, { xAxis: { data: D.ds.dates.slice(v0, cut + h) }, yAxis: { name: D.ds.unit }, series: ser });
+    const best = rows[0], sn = rows.find(r => r.k === 'snaive');
+    d.out(best && run.done === run.total ? Site.tiles([['冠军', best.R.name, 'MAE ' + Site.fmt(best.mae)], ['比季节朴素法', sn ? Site.pct(1 - best.mae / sn.mae, 0) : '—', sn ? '误差下降幅度' : '未参赛', 'good'], ['第 1 名与第 2 名的差距', rows[1] ? Site.pct(rows[1].mae / best.mae - 1, 0) : '—', '差距小就选更简单的']]) : '', 1);
+  },
+});
+
+/* ==================== 案例一：安全库存 ==================== */
+Site.demo('inv-demo', {
+  controls: [
+    { k: 'L', label: '提前期 L', min: 3, max: 21, step: 1, value: 7, fmt: v => v + ' 天' },
+    { k: 'sl', label: '目标服务水平', min: 80, max: 99.5, step: 0.5, value: 95, fmt: v => v + '%' },
+    { k: 'ex', label: '排除含 618 / 双 11 当天的窗口（大促单独备货）', type: 'check', value: true },
+  ],
+  setup(s) { // 每 5 天一个预测起点，各预测 21 天，记录逐日误差（实际 − 预测）
+    s.orig = [];
+    for (let cut = 640; cut <= 1039; cut += 5) {
+      const fc = TS.etsFit(RT.y.slice(cut - 365, cut), { trend: true, phi: 0.9, seasonal: 'mul', m: 7 }).forecast(21).mean;
+      s.orig.push({ cut, fc, err: fc.map((f, j) => RT.y[cut + j] - f) });
+    }
+  },
+  render(s, d) {
+    const L = s.L, p = Site.pal(), big = (o) => { for (let j = 0; j < L; j++) { const e = RT.event[o.cut + j]; if (e === '618' || e === '双11') return true; } return false; };
+    const use = s.orig.filter(o => !s.ex || !big(o)), E = use.map(o => TS.sum(o.err.slice(0, L))), daily = [].concat(...use.map(o => o.err.slice(0, L)));
+    const sdL = TS.std(E), sdD = TS.std(daily), last = s.orig[s.orig.length - 1], demand = TS.sum(last.fc.slice(0, L)), q = s.sl / 100, z = TS.normInv(q);
+    const ssEmp = Math.max(0, TS.quantile(E, q)), ssNorm = z * sdL, ssSqrt = z * sdD * Math.sqrt(L);
+    const lo = Math.min(...E), hi = Math.max(...E), nb = 16, w = (hi - lo) / nb || 1, hist = new Array(nb).fill(0); E.forEach(v => { hist[Math.min(nb - 1, Math.floor((v - lo) / w))]++; });
+    const bar = S.bar('回测窗口数', hist, { c: 0, maxW: 22 }); bar.markLine = S.vline(String(Math.round(lo + w * (Math.min(nb - 1, Math.floor((ssEmp - lo) / w)) + 0.5))), { label: '安全库存', c: p.s[1] });
+    d.chart(0, { xAxis: { data: hist.map((_, i) => String(Math.round(lo + w * (i + 0.5)))), name: '累计误差（件）', nameLocation: 'middle', nameGap: 22 }, yAxis: { scale: false }, legend: false, series: [bar] });
+    const xs = []; for (let v = 80; v <= 99.5; v += 0.5) xs.push(v);
+    const cur = S.line('回测实测（经验分位数）', xs.map(v => Math.round(Math.max(0, TS.quantile(E, v / 100)))), { c: 0, w: 2.5 }); cur.markLine = S.vline(String(s.sl), { c: p.s[1] });
+    d.chart(1, { xAxis: { data: xs.map(String), name: '服务水平 %', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: '安全库存（件）', scale: false },
+      series: [cur, S.line('回测实测（正态近似 z·σL）', xs.map(v => Math.round(TS.normInv(v / 100) * sdL)), { c: 2 }), S.line('按 √L 推算（假设误差独立）', xs.map(v => Math.round(TS.normInv(v / 100) * sdD * Math.sqrt(L))), { c: 7, dash: true })] });
+    d.out(Site.tiles([
+      ['提前期内的预测需求', Math.round(demand), '件（未来 ' + L + ' 天）'],
+      ['安全库存', Math.round(ssEmp), `回测累计误差的 ${s.sl}% 分位数`, 'good'],
+      ['再订货点', Math.round(demand + ssEmp), '库存降到这里就该下单'],
+      ['安全库存 ÷ 日均需求', (ssEmp / (demand / L)).toFixed(1) + ' 天', '相当于多备这么多天的量'],
+      ['√L 公式 ÷ 实测 σL', (sdD * Math.sqrt(L) / sdL).toFixed(2), sdD * Math.sqrt(L) < sdL * 0.9 ? '低估了风险（误差是相关的）' : '两者接近', sdD * Math.sqrt(L) < sdL * 0.9 ? 'bad' : ''],
+      ['参与统计的回测窗口', use.length + ' 个'],
+    ]));
+  },
+});
+
+/* ==================== 案例二：负荷与气温 ==================== */
+Site.demo('load-demo', {
+  controls: [{ k: 'day', label: '查看测试期的第几天', min: 1, max: 7, step: 1, value: 3 }],
+  setup(s) {
+    const ds = TS.data.load(), n = ds.y.length, cut = n - 24 * 7, base = { lags: [24, 48, 168], roll: [], phase: 24, dow: true, log: true };
+    // 日前预测：特征只用 ≥24 小时之前的负荷，所以整周可以直接逐点预测（不需要递归）
+    const fit = cfg => { const tr = ML.makeXY(ds, cfg, 0, cut, false), g = ML.gbdt(tr.X, tr.y, { nTrees: 200, lr: 0.06, maxDepth: 4, minLeaf: 10 }); return ML.oneStep(g, ds, cfg, cut, n, false); };
+    s.r = { ds, cut, n, f0: fit(base), f1: fit(Object.assign({ exog: ['temp'] }, base)) };
+  },
+  render(s, d) {
+    const { ds, cut, n, f0, f1 } = s.r, a = (s.day - 1) * 24, v0 = Math.max(0, a - 24), v1 = Math.min(n - cut, a + 48), p = Site.pal();
+    const act = S.line('实际负荷', ds.y.slice(cut + v0, cut + v1), { c: p.ink, w: 1.8, op: 0.8 }); act.markArea = S.areas([[ds.dates[cut + a], ds.dates[cut + a + 23], '第 ' + s.day + ' 天', 0]]);
+    d.chart(0, { xAxis: { data: ds.dates.slice(cut + v0, cut + v1) }, yAxis: { name: 'MW' }, series: [act, S.line('GBDT · 不含气温', f0.slice(v0, v1).map(Math.round), { c: 7, dash: true }), S.line('GBDT · 含气温', f1.slice(v0, v1).map(Math.round), { c: 2, w: 2.5 })] });
+    const pts = []; for (let t = 15; t < n; t += 24) pts.push([ds.temp[t], ds.y[t]]);
+    d.chart(1, { xAxis: { type: 'value', name: '气温 °C', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: 'MW' }, legend: false, tooltip: { trigger: 'item', formatter: q => q.value[0] + ' °C → ' + q.value[1] + ' MW' }, series: [S.scatter('每天 15 点', pts, { c: 1, size: 8 })] });
+    const actual = ds.y.slice(cut), m0 = TS.metrics(actual, f0), m1 = TS.metrics(actual, f1), peak = f => TS.mean(Array.from({ length: 7 }, (_, k) => Math.abs(Math.max(...f.slice(k * 24, k * 24 + 24)) - Math.max(...actual.slice(k * 24, k * 24 + 24)))));
+    const dayT = ds.temp.slice(cut + a, cut + a + 24);
+    d.out(Site.tiles([
+      ['不含气温 · 一周 MAE', m0.mae, 'MW　WAPE ' + Site.pct(m0.wape)], ['含气温 · 一周 MAE', m1.mae, 'MW　WAPE ' + Site.pct(m1.wape), m1.mae < m0.mae ? 'good' : ''],
+      ['日峰值的平均误差', Math.round(peak(f0)) + ' → ' + Math.round(peak(f1)), 'MW（不含 → 含气温）', peak(f1) < peak(f0) ? 'good' : ''],
+      ['第 ' + s.day + ' 天的最高气温', Math.max(...dayT).toFixed(1) + ' °C', '前一天 ' + (s.day > 1 ? Math.max(...ds.temp.slice(cut + a - 24, cut + a)).toFixed(1) : Math.max(...ds.temp.slice(cut - 24, cut)).toFixed(1)) + ' °C'],
+    ]));
+  },
+});
+
+/* ==================== 案例三：监控 ==================== */
+Site.demo('mon-demo', {
+  controls: [
+    { k: 'k', label: '动态阈值：几倍误差算异常', min: 2, max: 6, step: 0.25, value: 3, fmt: v => v + ' σ' },
+    { k: 'fx', label: '固定阈值：日环比下跌超过', min: 5, max: 35, step: 1, value: 10, fmt: v => v + '%' },
+  ],
+  setup(s) {
+    const ds = TS.data.dau(), par = TS.etsFit(ds.y.slice(0, 120), { trend: true, phi: 0.95, seasonal: 'mul', m: 7 }).params;
+    const opt = Object.assign({ trend: true, phi: 0.95, seasonal: 'mul', m: 7 }, par);
+    // 两遍法：第一遍找出明显偏离的点，用当时的预测值替换它们再跑第二遍——"异常值不喂回模型"
+    let fit = TS.ets(ds.y, opt), rel = ds.y.map((v, i) => v / fit.fitted[i] - 1);
+    const sig = 1.4826 * TS.median(rel.slice(14, 120).map(Math.abs));
+    const y2 = ds.y.map((v, i) => (i > 14 && Math.abs(rel[i]) > 4 * sig ? fit.fitted[i] : v));
+    for (let pass = 0; pass < 2; pass++) { fit = TS.ets(y2, opt); rel = ds.y.map((v, i) => v / fit.fitted[i] - 1); for (let i = 15; i < y2.length; i++) y2[i] = Math.abs(rel[i]) > 4 * sig ? fit.fitted[i] : ds.y[i]; }
+    fit = TS.ets(y2, opt); rel = ds.y.map((v, i) => v / fit.fitted[i] - 1);
+    s.r = { ds, fit, rel, sig };
+  },
+  render(s, d) {
+    const { ds, fit, rel, sig } = s.r, a = 60, n = ds.y.length, p = Site.pal(), A = new Set(ds.anomalies), rels = new Set(ds.release);
+    const dyn = [], fixed = []; for (let i = a; i < n; i++) { if (Math.abs(rel[i]) > s.k * sig) dyn.push(i); if (ds.y[i] / ds.y[i - 1] - 1 < -s.fx / 100) fixed.push(i); }
+    const cls = arr => { const hit = arr.filter(i => A.has(i)), after = arr.filter(i => !A.has(i) && (A.has(i - 1) || A.has(i - 2))), rl = arr.filter(i => !A.has(i) && [...rels].some(r => i >= r && i <= r + 2)), other = arr.filter(i => !hit.includes(i) && !after.includes(i) && !rl.includes(i)); return { hit, after, rl, other }; };
+    const cd = cls(dyn), cf = cls(fixed), x = ds.dates.slice(a), sl = arr => arr.slice(a);
+    const main = S.line('日活', sl(ds.y), { c: 0, w: 1.4 }); main.markLine = S.vline(ds.release.map(i => ds.dates[i]), { label: '发版', c: p.muted });
+    d.chart(0, { xAxis: { data: x }, yAxis: { name: '人' }, dataZoom: true,
+      series: [main, ...S.band(sl(fit.fitted.map(v => v * (1 - s.k * sig))), sl(fit.fitted.map(v => v * (1 + s.k * sig))), { c: p.muted, op: 0.25 }),
+        S.scatter('动态阈值告警', dyn.map(i => [i - a, ds.y[i]]), { c: p.crit, size: 10 }), S.scatter('固定阈值告警', fixed.map(i => [i - a, ds.y[i]]), { c: 3, size: 7, x: { symbol: 'triangle' } })] });
+    const row = (nm, c, tot) => [nm, tot, `${c.hit.length} / ${A.size}`, c.after.length, c.rl.length, c.other.length];
+    d.out(Site.table(['方法', '告警总数', '命中真实异常', '异常的次日余波', '发版引起', '其他误报'], [row('动态阈值（预测区间）', cd, dyn.length), row('固定阈值（日环比）', cf, fixed.length)], { num: [1, 2, 3, 4, 5], hl: 0 }) +
+      `<div class="small muted">模型的一步预测相对误差（稳健标准差）σ ≈ ${Site.pct(sig)}；动态阈值相当于"偏离预测超过 ${Site.pct(s.k * sig)}"才告警。</div>`);
+  },
+});
+
+/* ==================== 案例四：促销增量 ==================== */
+const CAMPAIGNS = (() => { // 从数据里找出各次活动的起止日
+  const out = []; let i = 0;
+  const grp = e => (e === '618' || e === '618预热') ? '618' : (e === '双11' || e === '双11预热') ? '双 11' : e === '小促' ? '小促' : null;
+  while (i < RT.y.length) { const g = grp(RT.event[i]); if (!g) { i++; continue; } let j = i; while (j + 1 < RT.y.length && grp(RT.event[j + 1]) === g) j++; out.push({ a: i, b: j, name: RT.dates[i].slice(0, 4) + ' 年 ' + RT.dates[i].slice(5).replace('-', ' 月 ') + ' 日 ' + g + '（' + (j - i + 1) + ' 天）' }); i = j + 1; }
+  return out.filter(c => c.a > 40 && c.b < RT.y.length - 30).slice(-8).reverse();
+})();
+Site.demo('promo-demo', {
+  controls: [{ k: 'c', label: '选择一次活动', type: 'select', options: CAMPAIGNS.map((c, i) => [i, c.name]), value: 0 }],
+  setup(s) { // 先把所有活动日当作缺失并填充，再取"稳健趋势 × 星期指数"作为每一天的正常预期
+    const filled = C.impute(RT.y.map((v, i) => (RT.event[i] ? NaN : v)), 'seasonal', 7);
+    s.base = C.outliers(filled, { method: 'resid', m: 7, log: true }).expected;
+  },
+  render(s, d) {
+    const c = CAMPAIGNS[s.c], v0 = c.a - 21, v1 = c.b + 22, p = Site.pal(), base = s.base, post = 7;
+    const act = S.line('实际销量', RT.y.slice(v0, v1), { c: 0, w: 2 });
+    act.markArea = S.areas([[RT.dates[c.a], RT.dates[c.b], '活动期', 2], [RT.dates[c.b + 1], RT.dates[c.b + post], '活动后一周', 7]]);
+    d.chart(0, { xAxis: { data: RT.dates.slice(v0, v1) }, yAxis: { name: '件' }, series: [act, S.line('反事实基线（没有活动时的预期）', base.slice(v0, v1).map(Math.round), { c: 1, dash: true, w: 2 })] });
+    const sum = (a, b, f) => { let t = 0; for (let i = a; i <= b; i++) t += f(i); return t; }, len = c.b - c.a + 1;
+    const gross = sum(c.a, c.b, i => RT.y[i] - base[i]), after = sum(c.b + 1, c.b + post, i => RT.y[i] - base[i]), baseSum = sum(c.a, c.b, i => base[i]);
+    const naive = sum(c.a, c.b, i => RT.y[i]) - len / 7 * sum(c.a - 7, c.a - 1, i => RT.y[i]);
+    d.out(Site.tiles([
+      ['活动期毛增量', Math.round(gross), '件　相对基线 +' + Site.pct(gross / baseSum, 0), 'good'],
+      ['活动后一周的变化', Math.round(after), after < 0 ? '件　被透支的需求' : '件　没有明显透支', after < 0 ? 'bad' : ''],
+      ['净增量', Math.round(gross + Math.min(0, after)), '件　= 毛增量 − 透支'],
+      ['"活动期 − 活动前一周"算法', Math.round(naive), '件　与毛增量相差 ' + Site.pct(naive / gross - 1, 0)],
+    ]));
+  },
+});
+
+/* ==================== 选型问答 ==================== */
+Site.demo('choose-demo', {
+  controls: [
+    { k: 'n', label: '有多少条序列', type: 'seg', options: [['few', '几条'], ['mid', '几十到几千'], ['many', '上万条']] },
+    { k: 'len', label: '每条的历史长度', type: 'seg', options: [['short', '不足 2 个季节周期'], ['ok', '2 个周期以上']], value: 'ok' },
+    { k: 'x', label: '有重要的外部变量（促销、价格、天气）', type: 'check', value: false },
+    { k: 'prob', label: '需要概率预测 / 分位数（补货、容量规划）', type: 'check', value: false },
+    { k: 'exp', label: '需要向业务方逐项解释', type: 'check', value: false },
+  ],
+  render(s, d) {
+    const rec = [], add = (t, why, ch) => rec.push([t, why, ch]);
+    add('季节朴素法（基线）', '任何情况都要先建，其他模型必须打败它', '<a href="05-evaluation.html">05</a>');
+    if (s.len === 'short') {
+      add('简单指数平滑 / 朴素法', '历史太短，估不出可靠的季节和趋势，越简单越稳', '<a href="06-smoothing.html">06</a>');
+      if (s.n !== 'few') add('全局 GBDT（用品类等属性特征）', '让短序列向其他序列"借"规律', '<a href="08-ml.html">08</a>');
+      add('时序大模型零样本预测', '不需要训练数据，适合冷启动；作为候选放进回测', '<a href="11-transformer.html">11</a>');
+    } else {
+      if (s.n === 'few') { add('ETS / Holt-Winters（阻尼趋势）', '快、稳、可解释，单条序列的首选', '<a href="06-smoothing.html">06</a>'); add('SARIMA' + (s.x ? ' / ARIMAX' : ''), s.x ? '用回归项引入促销、节假日' : '短期预测强，自带区间和诊断', '<a href="07-arima.html">07</a>'); }
+      if (s.x || s.n !== 'few') add('GBDT + 特征工程（LightGBM）', s.x ? '最擅长利用外部变量和它们的交互' : '多序列堆在一起训练一个全局模型', '<a href="08-ml.html">08</a>');
+      if (s.n === 'many') add('DeepAR / TFT / PatchTST', '序列足够多时深度模型开始有优势；务必和全局 GBDT 对比', '<a href="10-lstm.html">10</a>、<a href="11-transformer.html">11</a>');
+      if (s.n === 'mid') add('（可选）深度模型', '几千条序列时值得放进回测试一试，但通常 GBDT 更省事', '<a href="10-lstm.html">10</a>');
+    }
+    if (s.prob) add('分位数预测', s.n === 'few' ? 'ETS / ARIMA 自带区间；或用回测误差的经验分位数' : 'GBDT 的分位数损失、DeepAR；并用回测检验覆盖率', '<a href="05-evaluation.html">05</a>');
+    if (s.exp) add('可解释性优先', '统计模型的系数、GBDT 的特征重要性；避免把纯黑盒作为唯一依据', '<a href="07-arima.html">07</a>、<a href="08-ml.html">08</a>');
+    d.out(Site.table(['建议尝试', '理由', '章节'], rec) + '<div class="small muted">最后一步永远相同：把这些候选放进同一套滚动回测，用业务指标比较。</div>');
+  },
+});
+
+Site.flow('flow', [
+  { t: '重训节奏', d: '<p>统计模型便宜，可以每天用最新数据重新拟合；GBDT 常见做法是每周或每月重训，每天只做预测。判断标准：<strong>回测里比较"每天重训"和"每月重训"的误差</strong>，差别不大就不必频繁重训。业务发生结构性变化（改价、渠道调整）后要立即重训。</p>' },
+  { t: '监控误差', d: '<p>每天把"到期"的预测和实际值对账：WAPE、Bias 的滚动曲线；按品类、门店、星期、是否促销分组看。<strong>Bias 持续偏向一侧</strong>是最早的预警信号——模型开始系统性高估或低估了。</p>' },
+  { t: '监控数据', d: '<p>输入数据的分布变了吗（数据漂移）？缺失率、零值比例、特征的均值方差有没有突变？上游表有没有晚到或口径变化？很多"模型变差"其实是数据出了问题（第 03 章）。</p>' },
+  { t: '人工调整', d: '<p>业务方掌握模型不知道的信息（新品上市、竞品动作），允许他们调整预测是合理的。但要算<strong>预测增加值（FVA）</strong>：调整后的误差是否真的低于调整前？实践中相当一部分人工调整是负贡献——用数据来约束它。</p>' },
+  { t: '分层一致', d: '<p>单品预测加起来应该等于品类预测、门店预测加起来应该等于区域预测。各层各自预测后往往对不上，需要<strong>调和</strong>（reconciliation）：自下而上汇总、自上而下分摊，或用统计方法（MinT）综合各层。</p>' },
+  { t: '迭代', d: '<p>把每次重大预测失误做成案例：是数据问题、缺特征、还是模型问题？答案通常是前两个。新特征、新模型都先进回测，证明优于现役模型再替换。</p>' },
+], 1);
+
+Site.quiz('quiz', [
+  { q: '回测里模型 A 的 MAE 是 100，模型 B 是 97，而各折之间 MAE 的标准差约为 15。B 复杂得多。应该选哪个？', opts: ['B，因为误差更低', 'A：3% 的差距远小于折间波动，不足以证明 B 更好，而 A 更简单、更便宜', '两个都不选', '取决于哪个模型更新'], ans: 1, why: '差距落在噪声范围内时不能说 B 更准。相同精度下优先选简单、稳定、便宜的模型。' },
+  { q: '安全库存的大小主要取决于什么？', opts: ['平均需求的大小', '提前期内预测误差的大小（以及目标服务水平）', '商品单价', '仓库面积'], ans: 1, why: '安全库存是为预测误差买的保险。需求再大，只要能预测准，就不需要多少安全库存；预测越不准、提前期越长、服务水平要求越高，安全库存越多。' },
+  { q: '用"活动期销量 − 活动前一周销量"评估促销效果，可能高估的原因是？', opts: ['活动期恰好包含更多周末，本来就卖得多；且没扣除活动后被透支的需求', '活动期太短', '没有使用深度学习', '销量数据不准'], ans: 0, why: '正确做法是与反事实基线（考虑了星期、趋势等的"无活动预期"）比较，并把活动后的回落计入。' },
+  { q: '线上模型近三周的 Bias 持续为正（预测高于实际）且在扩大。首先应该做什么？', opts: ['立刻换成更复杂的模型', '检查数据和业务是否发生变化（口径、缺失、渠道调整、需求下行），再决定重训或修正', '把所有预测值乘以 0.9', '忽略，等它自己恢复'], ans: 1, why: '持续单向偏差说明模型的假设不再成立。多数情况是数据或业务变了，先定位原因；直接打折只是临时止血。' },
+]);
+</script>
+</body>
+</html>

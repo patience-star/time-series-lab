@@ -109,7 +109,7 @@
     for (let i = 0; i < n; i++) {
       const h = i % 24, day = Math.floor(i / 24), dw = (day + 1) % 7;
       if (h === 0) wx = 0.8 * wx + 1.6 * r.n();
-      const tp = 27 + 4 * day / 56 + wx + 4.5 * Math.sin(2 * Math.PI * (h - 9) / 24) + 0.4 * r.n();
+      const tp = 27.5 + 2 * Math.sin(2 * Math.PI * day / 28) + wx + 4.5 * Math.sin(2 * Math.PI * (h - 9) / 24) + 0.4 * r.n(); // 热浪起伏 + 天气随机波动 + 日内变化
       const wk = (dw === 0 || dw === 6) ? 0.86 : 1;
       const v = (3200 * prof[h] * wk + 70 * Math.max(0, tp - 26)) * (1 + 0.015 * r.n());
       y.push(Math.round(v)); temp.push(+tp.toFixed(1));

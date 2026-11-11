@@ -14,6 +14,8 @@
    *   roll: [7,28]          过去 w 天的滚动均值（窗口止于 t-1，不含当天）
    *   rollStd: [7]          过去 w 天的滚动标准差
    *   dow / month / trend   日历特征；onehot=true 时星期用 7 个 0/1 列（线性模型需要）
+   *   phase: m              周期内的位置 t % m（小时数据的"几点"）
+   *   exog: ['temp']        外部变量：直接取 ds[名字][t]（必须是预测时已知或有预报的量）
    *   promo / holiday       已知的未来信息：促销计划、春节
    *   fourier: K            年周期的 K 对正余弦
    *   log: true             目标取对数
@@ -31,8 +33,10 @@
     (cfg.roll || []).forEach(w => n.push('近' + w + '日均值'));
     (cfg.rollStd || []).forEach(w => n.push('近' + w + '日波动'));
     if (cfg.dow) { if (cfg.onehot) for (let k = 0; k < 7; k++) n.push('星期=' + TS.DOW[k]); else n.push('星期几'); }
+    if (cfg.phase) { if (cfg.onehot) for (let k = 0; k < cfg.phase; k++) n.push('时段=' + k); else n.push('时段'); }
     if (cfg.month) n.push('月份');
     if (cfg.trend) n.push('时间趋势');
+    (cfg.exog || []).forEach(k => n.push('外部:' + k));
     if (cfg.promo) { n.push('促销'); n.push('大促当天'); }
     if (cfg.holiday) n.push('春节');
     for (let k = 1; k <= (cfg.fourier || 0); k++) { n.push('年周期sin' + k); n.push('年周期cos' + k); }
@@ -40,7 +44,7 @@
     return n;
   };
   // 特征分组（用于汇总重要性）：把 one-hot、成对的列归到一组
-  ML.featGroup = name => name.startsWith('星期') ? '星期几' : name.startsWith('年周期') ? '年周期' : (name === '促销' || name === '大促当天') ? '促销' : name;
+  ML.featGroup = name => name.startsWith('星期') ? '星期几' : name.startsWith('时段') ? '时段' : name.startsWith('年周期') ? '年周期' : (name === '促销' || name === '大促当天') ? '促销' : name;
 
   // 生成第 t 天的特征行。hist：t 之前的（变换后的）目标值；预测未来时其中包含模型自己的预测。
   // peek=true 仅用于演示泄漏：允许"居中均值"特征读取 t 当天及之后的真实值。
@@ -51,8 +55,10 @@
     (cfg.rollStd || []).forEach(w => { let s = 0, q = 0; for (let i = t - w; i < t; i++) { s += hist[i]; q += hist[i] * hist[i]; } row.push(Math.sqrt(Math.max(0, q / w - (s / w) * (s / w)))); });
     const d = ds.dates[t];
     if (cfg.dow) { const w = TS.dow(d); if (cfg.onehot) for (let k = 0; k < 7; k++) row.push(+(w === k)); else row.push(w); }
+    if (cfg.phase) { const ph = t % cfg.phase; if (cfg.onehot) for (let k = 0; k < cfg.phase; k++) row.push(+(ph === k)); else row.push(ph); }
     if (cfg.month) row.push(+d.slice(5, 7));
     if (cfg.trend) row.push(t / 365);
+    (cfg.exog || []).forEach(k => row.push(ds[k][t]));
     if (cfg.promo) { row.push(ds.promo[t]); row.push(+(ds.event[t] === '618' || ds.event[t] === '双11')); }
     if (cfg.holiday) row.push(ds.holiday[t]);
     if (cfg.fourier) { const doy = (TS.dayIndex(d) - TS.dayIndex(d.slice(0, 4) + '-01-01')) / 365.25; for (let k = 1; k <= cfg.fourier; k++) { row.push(Math.sin(2 * Math.PI * k * doy)); row.push(Math.cos(2 * Math.PI * k * doy)); } }
