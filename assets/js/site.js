@@ -264,9 +264,10 @@
         type: a.type || (isY ? 'value' : 'category'),
         axisLine: merge({ show: !isY, lineStyle: { color: p.axis } }, a.axisLine),
         axisTick: merge({ show: false }, a.axisTick),
-        axisLabel: merge({ color: p.muted, fontSize: 11, hideOverlap: true }, a.axisLabel),
+        // 类别很少（柱状图的几个模型名）时全部显示；否则自动隐藏重叠的刻度文字
+        axisLabel: merge(!isVal && a.data && a.data.length <= 6 ? { color: p.muted, fontSize: 11, interval: 0 } : { color: p.muted, fontSize: 11, hideOverlap: true }, a.axisLabel),
         splitLine: merge({ show: isY || isVal, lineStyle: { color: p.grid } }, a.splitLine),
-        nameTextStyle: merge({ color: p.muted, fontSize: 11 }, a.nameTextStyle),
+        nameTextStyle: merge(isY ? { color: p.muted, fontSize: 11, align: 'right' } : { color: p.muted, fontSize: 11 }, a.nameTextStyle),
         scale: a.scale == null ? isVal : a.scale,
       });
     };
@@ -282,9 +283,11 @@
       o.legend = merge({ top: 0, left: 0, type: 'scroll', data: names, itemWidth: 16, itemHeight: 8, itemGap: 14, icon: 'roundRect',
         textStyle: { color: p.ink2, fontSize: 12 }, pageIconColor: p.ink2, pageTextStyle: { color: p.muted }, inactiveColor: p.axis }, o.legend === true ? {} : o.legend);
     } else delete o.legend;
-    if (o.grid === undefined) o.grid = { left: 6, right: 14, top: showLegend ? 34 : 14, bottom: o.dataZoom ? 46 : 6, containLabel: true };
+    // 顶部留白：图例一行 + （如果有）纵轴名称一行，互不重叠
+    const yNamed = [].concat(o.yAxis || []).some(a => a && a.name), top = (showLegend ? 30 : 8) + (yNamed ? 22 : 6);
+    if (o.grid === undefined) o.grid = { left: 6, right: 14, top, bottom: o.dataZoom ? 46 : 6, containLabel: true };
     else if (Array.isArray(o.grid)) o.grid = o.grid.map(x => merge({ containLabel: true, left: 6, right: 14 }, x));
-    else o.grid = merge({ left: 6, right: 14, top: showLegend ? 34 : 14, bottom: 6, containLabel: true }, o.grid);
+    else o.grid = merge({ left: 6, right: 14, top, bottom: 6, containLabel: true }, o.grid);
     if (o.tooltip !== false) {
       const tt = merge({ trigger: 'axis', confine: true }, o.tooltip);
       o.tooltip = merge({
@@ -522,6 +525,8 @@
   /* ---------- 启动 ---------- */
   buildChrome();
   enhanceCode();
+  // 结构图在手机上保持可读的字号：包一层可横向滑动的容器
+  $$('svg.diagram').forEach(svg => { const w = document.createElement('div'); w.className = 'svg-scroll'; svg.parentNode.insertBefore(w, svg); w.appendChild(svg); });
   Site.math($('main'));
   g.Site = Site;
 })(window);
