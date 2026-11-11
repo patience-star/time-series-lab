@@ -72,7 +72,7 @@ Site.demo('hero-demo', {
     const show = Math.min(ds.y.length - h, m * 12);
     const cut = ds.y.length - h;                       // 留出最后一段当"未来"，可以对答案
     const train = ds.y.slice(Math.max(0, cut - m * 60), cut);
-    const fit = TS.etsFit(train, { trend: true, seasonal: 'mul', m });
+    const fit = TS.etsFit(train, { trend: true, phi: 0.9, seasonal: 'mul', m }); // 阻尼趋势，长步长更稳
     const fc = fit.forecast(h), pad = new Array(show).fill(null);
     const x = ds.dates.slice(cut - show);
     const actual = ds.y.slice(cut);

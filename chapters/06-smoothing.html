@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06 指数平滑 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="06">
+<main>
+<p class="lead">指数平滑是工业界用得最广的预测方法之一：原理一句话就能说清（<strong>越近的数据越重要</strong>），计算快到可以给几十万个 SKU 每天各跑一遍，效果却常常不输复杂模型。这一章从最简单的版本出发，一步步加上趋势和季节，得到著名的 Holt-Winters 模型。</p>
+
+<section id="idea">
+<h2>核心思想：给近期数据更大的权重</h2>
+<p>移动平均把窗口里的每个点一视同仁，窗口外的一律不看——这有点武断。更自然的想法是：<strong>所有历史都看，但越久远的权重越小</strong>，而且按固定比例递减：</p>
+$$\hat y_{T+1} = \alpha\,y_T + \alpha(1-\alpha)\,y_{T-1} + \alpha(1-\alpha)^2\,y_{T-2} + \cdots$$
+<p>权重 $\alpha,\ \alpha(1-\alpha),\ \alpha(1-\alpha)^2,\dots$ 呈指数衰减，所以叫<strong>指数平滑</strong>。参数 $\alpha\in(0,1)$ 控制"遗忘速度"。</p>
+</section>
+
+<section id="ses">
+<h2>简单指数平滑（SES）</h2>
+<p>上面那个无穷求和有一个极其简洁的递推写法——只需记住一个数，<strong>水平</strong> $\ell_t$：</p>
+$$\ell_t = \alpha\,y_t + (1-\alpha)\,\ell_{t-1} \qquad\Longleftrightarrow\qquad \ell_t = \ell_{t-1} + \alpha\,(y_t - \ell_{t-1})$$
+<p>右边的写法更有启发性：<strong>新的估计 = 旧的估计 + α × 这次的预测误差</strong>。预测错了多少，就朝正确方向修正其中的 α 成。未来所有步的预测都等于最新的水平：$\hat y_{T+h} = \ell_T$（一条水平线），所以 SES 只适合没有趋势和季节的数据。</p>
+<div class="demo" id="ses-demo">
+  <div class="demo-title">🧪 实验：α 是"灵敏"和"稳重"之间的旋钮</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="260"></div>
+    <div class="chart-cap">最近 20 个观测各自的权重</div>
+    <div class="chart" data-h="150"></div>
+    <div class="readout"></div>
+    <p class="hint">数据在第 60 天水平突然上了一个台阶。α 很小（0.05）：曲线很平滑，但要过很久才追上新水平；α 很大（0.9）：立刻追上，但也跟着每一次噪声上蹿下跳。切到"只有噪声"的数据：α 越小误差越低；有台阶的数据：α 太小反而误差大。<strong>没有通用的最佳 α，要让数据自己选</strong>（最小化一步预测误差）。</p>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 业务里的 SES</div>
+  <p>很多监控系统和库存系统里的"指数加权移动平均（EWMA）"就是它。α = 0.1 大致相当于 19 天的移动平均（等效窗口 ≈ 2/α − 1），但不需要保存 19 天的数据——只存一个数，来一个新值更新一次，非常适合实时流式计算。</p>
+</div>
+</section>
+
+<section id="holt">
+<h2>Holt 线性趋势：再记一个"斜率"</h2>
+<p>数据有趋势时，SES 的水平线预测会系统性落后。Holt 的办法是再维护一个状态——<strong>趋势</strong> $b_t$（当前每步涨多少），并用同样的指数平滑方式更新它：</p>
+$$\begin{aligned}
+\text{水平：}\; & \ell_t = \alpha\,y_t + (1-\alpha)(\ell_{t-1} + b_{t-1})\\
+\text{趋势：}\; & b_t = \beta\,(\ell_t - \ell_{t-1}) + (1-\beta)\,b_{t-1}\\
+\text{预测：}\; & \hat y_{T+h} = \ell_T + h\,b_T
+\end{aligned}$$
+<p>预测是一条斜线。问题来了：<strong>现实中很少有东西能永远按当前速度涨下去</strong>。<strong>阻尼趋势</strong>（damped trend）给斜率乘一个小于 1 的系数 $\phi$，让趋势逐步衰减、预测曲线逐渐走平：</p>
+$$\hat y_{T+h} = \ell_T + (\phi + \phi^2 + \cdots + \phi^h)\,b_T$$
+<div class="demo" id="holt-demo">
+  <div class="demo-title">🧪 实验：线性外推 vs 阻尼趋势</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+    <p class="hint">数据是某个新功能的周活跃用户：前期高速增长，之后逐渐饱和（典型的 S 型增长）。站在高速增长期往后预测近一年：φ = 1（不阻尼）的预测一路直线冲上去，越远越离谱；把 φ 往下调，预测曲线逐渐走平，在某个位置和实际走势最接近；调得太小又会走平得太早。大量实证研究表明，<strong>阻尼趋势在长步长预测上通常更稳妥</strong>，是自动预测系统的默认选项之一——但它不是万能的：对持续稳定增长的数据，线性趋势反而更准（见下面 ETS 实验里的月度销售额）。</p>
+  </div>
+</div>
+</section>
+
+<section id="hw">
+<h2>Holt-Winters：水平 + 趋势 + 季节</h2>
+<p>再加第三个状态——每个季节位置一个<strong>季节系数</strong> $s_t$，就得到 Holt-Winters。三个状态各有一个平滑参数：$\alpha$（水平）、$\beta$（趋势）、$\gamma$（季节）。乘法季节版本：</p>
+$$\begin{aligned}
+\text{水平：}\; & \ell_t = \alpha\,\frac{y_t}{s_{t-m}} + (1-\alpha)(\ell_{t-1} + b_{t-1})\\
+\text{趋势：}\; & b_t = \beta\,(\ell_t - \ell_{t-1}) + (1-\beta)\,b_{t-1}\\
+\text{季节：}\; & s_t = \gamma\,\frac{y_t}{\ell_t} + (1-\gamma)\,s_{t-m}\\
+\text{预测：}\; & \hat y_{T+h} = (\ell_T + h\,b_T)\times s_{T+h-m}
+\end{aligned}$$
+<p>读法：先把今天的值<strong>除掉季节</strong>再去更新水平；用水平的变化更新趋势；用"今天的值 ÷ 水平"更新这个位置的季节系数。加法版本把除号换成减号、乘号换成加号。它其实就是把第 02 章的"分解"做成了<strong>在线、自适应</strong>的版本：每来一个新数据，三个成分各自微调一点。</p>
+<div class="demo" id="hw-demo">
+  <div class="demo-title">🧪 实验：Holt-Winters 调参台</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="chart-cap">模型学到的季节系数（训练结束时）</div>
+    <div class="chart" data-h="150"></div>
+    <div class="readout"></div>
+    <p class="hint">先手动拧一拧：γ 调到 0 时季节系数永远停在初始值；α 调得很大，拟合线几乎贴着数据走，但预测未必更准。然后点"自动寻优"，看三个参数怎么一步步收敛到让一步预测误差最小的位置。再做两个对比：① 在"电商日销量"上把趋势从"阻尼"切到"线性"再寻优——训练段末尾刚好有一次小促，线性趋势把它当成了"开始上涨"并一路外推，测试误差大幅变差；② 在"月度销售额"上对比加法和乘法季节：乘法的预测会随水平放大季节波动，更贴合实际。</p>
+  </div>
+</div>
+<div class="callout tip">
+  <div class="hd">💡 参数的典型取值与含义</div>
+  <ul>
+    <li><strong>α 大</strong>（&gt;0.5）：水平变化快，数据接近随机游走；<strong>α 小</strong>：水平稳定，波动多是噪声。</li>
+    <li><strong>β 通常很小</strong>（0–0.1）：趋势变化缓慢。β 寻优到 0 表示趋势基本恒定。</li>
+    <li><strong>γ 小</strong>：季节形状稳定；γ 大：季节形状在变（比如用户的周内习惯在迁移）。</li>
+    <li>初始状态（第一个周期的水平、趋势、季节）也会影响结果，数据短时尤其明显；成熟的库会把初始状态一起优化。</li>
+  </ul>
+</div>
+</section>
+
+<section id="ets">
+<h2>ETS 家族：自动选型</h2>
+<p>趋势可以是"无 / 加法 / 阻尼"，季节可以是"无 / 加法 / 乘法"，组合起来就是一个模型家族；再考虑误差是加法还是乘法，就是统计学里的 <strong>ETS</strong>（Error-Trend-Seasonal）框架。SES、Holt、Holt-Winters 都是其中的特例。ETS 框架带来两个好处：有了明确的概率模型，可以推导<strong>预测区间</strong>；可以用信息准则（AICc）在家族里<strong>自动选型</strong>。</p>
+<div class="demo" id="ets-demo">
+  <div class="demo-title">🧪 实验：九种组合，谁最适合这份数据</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="280"></div>
+    <div class="readout"></div>
+    <p class="hint">表格是九种组合在留出的测试段上的误差（每种都已自动寻优参数），高亮的是当前选中的组合。切换趋势和季节类型，看预测形状如何变化：没有季节项的预测是一条直线或缓弯的线；没有趋势项的预测在原地重复季节形状。自动选型（AutoETS）做的就是把这张表算一遍，只不过它用训练集上的 AICc 而不是测试误差来选。</p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>数据特征</th><th>推荐组合</th><th>常用名字</th></tr></thead>
+<tbody>
+<tr><td>无趋势、无季节</td><td>趋势 无 · 季节 无</td><td>简单指数平滑 SES</td></tr>
+<tr><td>有趋势、无季节</td><td>趋势 阻尼 · 季节 无</td><td>阻尼 Holt</td></tr>
+<tr><td>季节幅度固定</td><td>趋势 加法/阻尼 · 季节 加法</td><td>加法 Holt-Winters</td></tr>
+<tr><td>季节幅度随水平放大（最常见）</td><td>趋势 加法/阻尼 · 季节 乘法</td><td>乘法 Holt-Winters</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="proscons">
+<h2>优点、局限与使用建议</h2>
+<div class="cards">
+  <div class="card"><h4>✅ 优点</h4><p>快、稳、参数少且可解释；几十个数据点就能用；自带预测区间；对缺失少、规律稳定的序列效果常常接近最优。</p></div>
+  <div class="card"><h4>⚠️ 局限</h4><p>不能加入外部变量（促销、价格、天气）；只支持一个季节周期；对异常值敏感（会把尖峰吸收进水平和季节系数）；长周期季节（m=365）不适用。</p></div>
+  <div class="card"><h4>🧭 什么时候用</h4><p>大批量序列的自动预测；作为强基线；数据短、无协变量的场景。有明显促销效应时，要么先清洗事件，要么换第 08 章的特征模型。</p></div>
+</div>
+<details class="code" open><summary>Python 参考代码：SES / Holt / Holt-Winters / AutoETS</summary>
+<pre><code>from statsmodels.tsa.holtwinters import ExponentialSmoothing, SimpleExpSmoothing
+from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+
+train, test = y[:-28], y[-28:]
+
+# 简单指数平滑
+ses = SimpleExpSmoothing(train).fit()                  # 自动寻优 alpha
+print(ses.params["smoothing_level"])
+
+# Holt-Winters：阻尼趋势 + 乘法季节
+hw = ExponentialSmoothing(train, trend="add", damped_trend=True,
+                          seasonal="mul", seasonal_periods=7).fit()
+fc = hw.forecast(28)
+print(hw.params)                                       # alpha / beta / gamma / phi
+
+# ETS 状态空间版本：带预测区间
+ets = ETSModel(train, error="mul", trend="add", damped_trend=True,
+               seasonal="mul", seasonal_periods=7).fit(disp=False)
+pred = ets.get_prediction(start=len(train), end=len(train) + 27)
+band = pred.summary_frame(alpha=0.05)                  # mean, pi_lower, pi_upper
+
+# 成千上万条序列：statsforecast 的 AutoETS（自动选型，速度极快）
+from statsforecast import StatsForecast
+from statsforecast.models import AutoETS, SeasonalNaive
+sf = StatsForecast(models=[AutoETS(season_length=7), SeasonalNaive(7)], freq="D", n_jobs=-1)
+fc_all = sf.forecast(df=long_df, h=28, level=[80, 95])  # long_df: unique_id, ds, y</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>指数平滑 = 对历史做指数衰减的加权平均；递推形式是"旧估计 + α × 误差"。</li>
+  <li>SES 管水平，Holt 加趋势，Holt-Winters 再加季节；每个状态一个平滑参数。</li>
+  <li>阻尼趋势让长期预测逐渐走平，通常比线性外推更稳妥。</li>
+  <li>季节幅度随水平变化用乘法季节。</li>
+  <li>参数由数据通过最小化一步预测误差来确定；ETS 框架还能自动选型并给出预测区间。</li>
+  <li>不能用外部变量、只能一个季节周期，是它的主要局限。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+
+/* ---------- SES ---------- */
+Site.demo('ses-demo', {
+  controls: [
+    { k: 'alpha', label: 'α（平滑系数）', min: 0.02, max: 0.98, step: 0.02, value: 0.2, fmt: v => v.toFixed(2) },
+    { k: 'kind', label: '数据', type: 'seg', options: [['step', '水平有台阶'], ['flat', '只有噪声']] },
+  ],
+  render(s, d) {
+    const n = 120, h = 15, r = TS.rng(21), y = Array.from({ length: n }, (_, i) => +(100 + (s.kind === 'step' && i >= 60 ? 30 : 0) + 7 * r.n()).toFixed(1));
+    const fit = TS.ets(y, { alpha: s.alpha }), fc = fit.forecast(h), pad = new Array(n).fill(null);
+    d.chart(0, { xAxis: { data: Array.from({ length: n + h }, (_, i) => i + 1) }, yAxis: {},
+      series: [S.line('观测值', y.concat(new Array(h).fill(null)), { c: 0, w: 1, op: 0.6 }), S.line('平滑后的水平（一步预测）', fit.fitted.map(v => +v.toFixed(1)), { c: 1, w: 2.5 }), S.line('未来预测', pad.concat(fc.mean.map(v => +v.toFixed(1))), { c: 1, dash: true, w: 2.5 }), ...S.band(pad.concat(fc.lo), pad.concat(fc.hi), { c: 1 })] });
+    const w = Array.from({ length: 20 }, (_, k) => +(s.alpha * Math.pow(1 - s.alpha, k) * 100).toFixed(2));
+    d.chart(1, { xAxis: { data: w.map((_, k) => (k === 0 ? '最新' : k + ' 步前')) }, yAxis: { name: '权重 %', scale: false }, legend: false, series: [S.bar('权重', w, { c: 0, maxW: 18 })] });
+    // 用同一份数据算出最优 α 作对照
+    const best = TS.etsFit(y, {});
+    d.out(Site.tiles([
+      ['一步预测 RMSE', fit.sigma, '越小越好'], ['最优 α（自动寻优）', best.params.alpha.toFixed(2), 'RMSE ' + Site.fmt(best.sigma), 'good'],
+      ['权重减半所需步数', (Math.log(0.5) / Math.log(1 - s.alpha)).toFixed(1), '记忆有多长'], ['等效移动平均窗口', (2 / s.alpha - 1).toFixed(0) + ' 步', '≈ 2/α − 1'],
+    ]));
+  },
+});
+
+/* ---------- Holt ---------- */
+Site.demo('holt-demo', {
+  controls: [
+    { k: 'alpha', label: 'α（水平）', min: 0.1, max: 0.95, step: 0.05, value: 0.6, fmt: v => v.toFixed(2) },
+    { k: 'beta', label: 'β（趋势）', min: 0.02, max: 0.6, step: 0.02, value: 0.2, fmt: v => v.toFixed(2) },
+    { k: 'phi', label: 'φ（阻尼，1 = 不阻尼）', min: 0.7, max: 1, step: 0.01, value: 1, fmt: v => v.toFixed(2) },
+  ],
+  setup(s) { // 仿真一个新功能的周活跃用户：S 型增长，先加速、后饱和
+    const r = TS.rng(66), n = 80; s.x = TS.dates('2023-01-02', n * 7).filter((_, i) => i % 7 === 0);
+    s.y = Array.from({ length: n }, (_, t) => Math.round((5000 + 80000 / (1 + Math.exp(-(t - 25) / 6))) * (1 + 0.015 * r.n())));
+  },
+  render(s, d) {
+    const cut = 32, h = s.y.length - cut, train = s.y.slice(0, cut), actual = s.y.slice(cut), pad = new Array(cut).fill(null);
+    const run = phi => TS.ets(train, { alpha: s.alpha, beta: s.beta, trend: true, phi }).forecast(h).mean.map(Math.round);
+    const lin = run(1), dmp = run(s.phi);
+    const main = S.line('历史（周活跃用户）', train.concat(new Array(h).fill(null)), { c: 0 }); main.markLine = S.vline(s.x[cut], { label: '预测起点' });
+    const series = [main, S.line('之后实际发生的', pad.concat(actual), { c: 0, op: 0.4 }), S.line('Holt 线性趋势（φ=1）', pad.concat(lin), { c: 7, dash: true })];
+    if (s.phi < 1) series.push(S.line('阻尼趋势（φ=' + s.phi.toFixed(2) + '）', pad.concat(dmp), { c: 2, w: 2.5 }));
+    d.chart(0, { xAxis: { data: s.x }, yAxis: { name: '人' }, series });
+    const e1 = TS.metrics(actual, lin), e2 = TS.metrics(actual, dmp);
+    d.out(Site.tiles([
+      ['线性趋势 · 未来 ' + h + ' 周 MAE', e1.mae, '最后一周偏差 ' + Site.pct(lin[h - 1] / actual[h - 1] - 1), 'bad'],
+      ['阻尼趋势 · MAE', s.phi < 1 ? e2.mae : '把 φ 调到 1 以下', s.phi < 1 ? '最后一周偏差 ' + Site.pct(dmp[h - 1] / actual[h - 1] - 1) : '', s.phi < 1 && e2.mae < e1.mae ? 'good' : ''],
+      ['趋势的"总里程"', s.phi < 1 ? (s.phi / (1 - s.phi)).toFixed(1) + ' 步' : '无限', '阻尼后趋势累计只相当于这么多步'],
+    ]));
+  },
+});
+
+/* ---------- Holt-Winters ---------- */
+const HW_DATA = {
+  retail: () => { const ds = TS.data.retail(); return { m: 7, unit: '件', x: ds.dates.slice(760, 1004), train: ds.y.slice(760, 976), test: ds.y.slice(976, 1004), show: 84, labels: ['周六', '周日', '周一', '周二', '周三', '周四', '周五'].map((_, i) => TS.DOW[TS.dow(ds.dates[976 + i])]) }; },
+  monthly: () => { const ds = TS.data.monthly(); return { m: 12, unit: '万元', x: ds.dates, train: ds.y.slice(0, 96), test: ds.y.slice(96), show: 96, labels: Array.from({ length: 12 }, (_, i) => (i + 1) + '月') }; },
+};
+Site.demo('hw-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'seg', options: [['retail', '电商日销量'], ['monthly', '月度销售额']] },
+    { k: 'sea', label: '季节类型', type: 'seg', options: [['mul', '乘法'], ['add', '加法']] },
+    { k: 'phi', label: '趋势类型', type: 'seg', options: [[0.9, '阻尼 φ=0.9'], [1, '线性']] },
+    { k: 'alpha', label: 'α（水平）', min: 0.01, max: 0.99, step: 0.01, value: 0.5, fmt: v => v.toFixed(2) },
+    { k: 'beta', label: 'β（趋势）', min: 0, max: 0.5, step: 0.01, value: 0.1, fmt: v => v.toFixed(2) },
+    { k: 'gamma', label: 'γ（季节）', min: 0, max: 0.99, step: 0.01, value: 0.3, fmt: v => v.toFixed(2) },
+    { act: 'opt', label: '🎯 自动寻优', primary: true, run(s, d) {
+      const D = HW_DATA[s.ds](), fit = TS.etsFit(D.train, { trend: true, phi: s.phi, seasonal: s.sea, m: D.m }), path = fit.path, step = Math.max(1, Math.floor(path.length / 40)); let i = 0;
+      d.loop('opt', () => { const u = path[Math.min(i, path.length - 1)]; d.set('alpha', +u[0].toFixed(2)); d.set('beta', +Math.min(0.5, u[1]).toFixed(2)); d.set('gamma', +u[2].toFixed(2)); d.draw(); i += step; return i < path.length + step; }, 50);
+      return false;
+    } },
+  ],
+  render(s, d) {
+    const D = HW_DATA[s.ds](), n = D.train.length, h = D.test.length, m = D.m;
+    const fit = TS.ets(D.train, { alpha: s.alpha, beta: s.beta, gamma: s.gamma, phi: s.phi, trend: true, seasonal: s.sea, m }), fc = fit.forecast(h);
+    const v0 = n - D.show, pad = new Array(D.show).fill(null), rd = a => a.map(v => Math.round(v));
+    d.chart(0, { xAxis: { data: D.x.slice(v0) }, yAxis: { name: D.unit },
+      series: [S.line('训练数据', D.train.slice(v0).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }), S.line('实际（测试段）', pad.concat(D.test), { c: 0, op: 0.4 }),
+        S.line('拟合（一步预测）', rd(fit.fitted.slice(v0)), { c: 1, w: 1.2, op: 0.7 }), S.line('预测', pad.concat(rd(fc.mean)), { c: 1, dash: true, w: 2.5 }), ...S.band(pad.concat(fc.lo), pad.concat(fc.hi), { c: 1 })] });
+    const idx = Array.from({ length: m }, (_, k) => fit.season[n - m + k]), order = Array.from({ length: m }, (_, k) => (n - m + k) % m), byPos = new Array(m);
+    order.forEach((ph, k) => { byPos[s.ds === 'monthly' ? ph : k] = idx[k]; });
+    d.chart(1, { xAxis: { data: D.labels }, yAxis: { name: s.sea === 'mul' ? '倍数' : D.unit, scale: s.sea === 'mul' }, legend: false, series: [S.bar('季节系数', byPos.map(v => +v.toFixed(s.sea === 'mul' ? 3 : 0)), { c: 2, maxW: 26 })] });
+    const mt = TS.metrics(D.test, fc.mean, { train: D.train, m }), sn = TS.metrics(D.test, TS.fc.snaive(D.train, h, m));
+    d.out(Site.tiles([
+      ['训练集一步预测 RMSE', fit.sigma, '寻优的目标就是让它最小'], ['测试集 MAE', mt.mae, D.unit, mt.mae < sn.mae ? 'good' : 'bad'],
+      ['测试集 WAPE', Site.pct(mt.wape)], ['季节朴素法的测试 MAE', sn.mae, '基线'], ['MASE', mt.mase.toFixed(2), mt.mase < 1 ? '优于朴素' : '不如朴素'],
+    ]));
+  },
+});
+
+/* ---------- ETS 家族 ---------- */
+const T_OPTS = [['N', '无趋势'], ['A', '加法趋势'], ['Ad', '阻尼趋势']], S_OPTS = [['N', '无季节'], ['A', '加法季节'], ['M', '乘法季节']];
+const etsOpt = (t, se, m) => ({ trend: t !== 'N', phi: t === 'Ad' ? 0.9 : 1, seasonal: se === 'N' ? null : se === 'A' ? 'add' : 'mul', m });
+Site.demo('ets-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'seg', options: [['monthly', '月度销售额'], ['retail', '电商日销量']] },
+    { k: 't', label: '趋势', type: 'seg', options: T_OPTS, value: 'Ad' },
+    { k: 'se', label: '季节', type: 'seg', options: S_OPTS, value: 'M' },
+  ],
+  render(s, d, changed) {
+    const D = HW_DATA[s.ds](), m = D.m, h = D.test.length, n = D.train.length;
+    if (!s.cache || s.cache.ds !== s.ds) { // 九种组合各寻优一次，结果缓存
+      const grid = {}; T_OPTS.forEach(t => S_OPTS.forEach(se => { const fit = TS.etsFit(D.train, etsOpt(t[0], se[0], m)), fc = fit.forecast(h); grid[t[0] + se[0]] = { fc, mae: TS.metrics(D.test, fc.mean).mae }; }));
+      s.cache = { ds: s.ds, grid };
+    }
+    const g = s.cache.grid, cur = g[s.t + s.se], v0 = n - D.show, pad = new Array(D.show).fill(null);
+    d.chart(0, { xAxis: { data: D.x.slice(v0) }, yAxis: { name: D.unit },
+      series: [S.line('训练数据', D.train.slice(v0).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }), S.line('实际（测试段）', pad.concat(D.test), { c: 0, op: 0.4 }),
+        S.line('预测', pad.concat(cur.fc.mean.map(Math.round)), { c: 1, dash: true, w: 2.5 }), ...S.band(pad.concat(cur.fc.lo), pad.concat(cur.fc.hi), { c: 1 })] });
+    let bk = 'NN'; Object.keys(g).forEach(k => { if (g[k].mae < g[bk].mae) bk = k; });
+    const cell = (t, se) => { const k = t + se, v = Site.fmt(g[k].mae); return (k === s.t + s.se ? `<b>▶ ${v}</b>` : v) + (k === bk ? ' <span class="tag good">最低</span>' : ''); };
+    d.out('<div class="chart-cap">测试段 MAE（' + D.unit + '）</div>' + Site.table([''].concat(S_OPTS.map(o => o[1])), T_OPTS.map(t => [t[1]].concat(S_OPTS.map(se => cell(t[0], se[0])))), { num: [1, 2, 3] }));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '简单指数平滑中，α = 0.9 和 α = 0.1 相比？', opts: ['α = 0.9 更平滑、反应更慢', 'α = 0.9 更看重最新数据，反应快但更容易被噪声带着跑', '两者没有区别', 'α = 0.9 只适用于有季节的数据'], ans: 1, why: 'α 是最新观测的权重。α 大 → 几乎只看最近一两个点，灵敏但不稳；α 小 → 记忆长，平滑但迟钝。' },
+  { q: '一条持续上涨的序列用 SES（无趋势项）预测，会出现什么情况？', opts: ['预测准确', '预测系统性偏低，因为它只能给出一条水平线', '预测系统性偏高', '无法计算'], ans: 1, why: 'SES 的预测是最新水平的水平线，而水平本身就滞后于上涨的数据，所以越往后低估越多。需要加趋势项（Holt）。' },
+  { q: '为什么长步长预测常常推荐"阻尼趋势"而不是线性趋势？', opts: ['阻尼趋势计算更快', '现实中的增长很少能永远保持当前速度，阻尼让预测逐渐走平，避免外推过头', '阻尼趋势不需要参数', '线性趋势不能和季节一起用'], ans: 1, why: '线性外推假设"当前增速永远持续"，步长一长就容易严重高估。阻尼趋势让增速逐渐衰减，实证上平均更准。' },
+  { q: '你的销量数据在大促期间有明显的促销效应，想把"是否促销"作为输入。Holt-Winters 能直接做到吗？', opts: ['能，加一个 δ 参数即可', '不能，标准指数平滑不支持外部变量；要么先把促销效应清洗/剥离，要么改用支持特征的模型', '能，把促销当季节', '能，调大 α'], ans: 1, why: '指数平滑只用序列自身的历史。需要外部变量时，考虑 ARIMAX（第 07 章）或基于特征的机器学习模型（第 08 章）。' },
+  { q: 'Holt-Winters 寻优后得到 γ ≈ 0。这说明什么？', opts: ['数据没有季节性', '季节形状很稳定，季节系数基本不需要随新数据调整', '模型出错了', '应该换成加法季节'], ans: 1, why: 'γ 控制季节系数的更新速度。γ≈0 表示初始估计的季节形状一直适用——季节是有的，只是不随时间变化。' },
+]);
+</script>
+</body>
+</html>

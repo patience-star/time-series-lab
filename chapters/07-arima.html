@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>07 ARIMA 家族 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="07">
+<main>
+<p class="lead">ARIMA 是时间序列统计建模的"教科书模型"：它把一条序列的规律拆成三块——<strong>自回归（AR）</strong>、<strong>差分（I）</strong>、<strong>移动平均（MA）</strong>。前面几章学的平稳性、差分、ACF/PACF 都是为它准备的。学完这一章，你能读懂 <code>ARIMA(1,1,1)(0,1,1)<sub>7</sub></code> 这样的记号，知道每个数字是怎么定出来的，也知道它什么时候好用、什么时候该换别的方法。</p>
+
+<section id="idea">
+<h2>三块积木</h2>
+<div class="cards">
+  <div class="card"><h4>AR(p) · 自回归</h4><p>今天的值 = 过去 <em>p</em> 天的值的加权和 + 新的冲击。刻画"<strong>惯性</strong>"。</p></div>
+  <div class="card"><h4>I(d) · 差分</h4><p>先做 <em>d</em> 次差分把序列变平稳，再建模。刻画"<strong>趋势</strong>"。</p></div>
+  <div class="card"><h4>MA(q) · 移动平均</h4><p>今天的值 = 新的冲击 + 过去 <em>q</em> 次冲击的余波。刻画"<strong>冲击的回声</strong>"。</p></div>
+</div>
+<p><strong>ARIMA(p, d, q)</strong> 就是：对序列做 $d$ 次差分，然后用 $p$ 阶 AR 加 $q$ 阶 MA 来描述差分后的平稳序列。</p>
+<div class="callout warn"><div class="hd">⚠️ 别被名字误导</div><p>这里的"移动平均（MA）模型"和第 02 章的"移动平均平滑"<strong>不是一回事</strong>。平滑是对<em>观测值</em>求平均；MA 模型是对<em>看不见的随机冲击</em>做加权。只是历史上撞了名。</p></div>
+</section>
+
+<section id="ar">
+<h2>AR：今天像过去</h2>
+$$y_t = c + \phi_1 y_{t-1} + \phi_2 y_{t-2} + \cdots + \phi_p y_{t-p} + \varepsilon_t$$
+<p>就是用自己的过去值做线性回归。$\phi$ 的大小决定惯性强弱；AR(2) 在特定参数下还会产生<strong>伪周期</strong>——没有固定周期的起伏（像经济景气循环）。平稳的条件是系数不能太大：AR(1) 要求 $|\phi_1|&lt;1$；AR(2) 要求 $\phi_1+\phi_2&lt;1$、$\phi_2-\phi_1&lt;1$、$|\phi_2|&lt;1$。</p>
+<div class="demo" id="ar-demo">
+  <div class="demo-title">🧪 实验：AR 模拟器</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="190"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">ACF</div><div class="chart" data-h="180"></div></div>
+      <div><div class="chart-cap">PACF</div><div class="chart" data-h="180"></div></div>
+    </div>
+    <div class="chart-cap">一次冲击的影响如何随时间消散（脉冲响应）</div>
+    <div class="chart" data-h="150"></div>
+    <div class="readout"></div>
+    <p class="hint">① φ₂ = 0，把 φ₁ 从 0.3 调到 0.9：ACF 衰减得越来越慢，PACF 始终只有第 1 根柱子。② φ₁ 调成负数：序列一上一下地"锯齿"振荡，ACF 正负交替。③ 设 φ₁ = 1.0、φ₂ = −0.6：序列出现像波浪一样的伪周期，ACF 呈衰减的正弦形，PACF 在第 2 根之后截尾。<strong>AR(p) 的指纹：ACF 拖尾，PACF 在 p 阶后截尾。</strong></p>
+  </div>
+</div>
+</section>
+
+<section id="ma">
+<h2>MA：冲击的回声</h2>
+$$y_t = \mu + \varepsilon_t + \theta_1 \varepsilon_{t-1} + \cdots + \theta_q \varepsilon_{t-q}$$
+<p>$\varepsilon_t$ 是每一期新发生的随机冲击（意外的大单、一次物流延误）。MA(q) 说的是：<strong>一次冲击只会影响接下来的 q 期，之后彻底消失</strong>。这和 AR 不同——AR 里的冲击会以指数衰减的方式永远留下痕迹。</p>
+<div class="callout biz"><div class="hd">💼 业务里的 MA 现象</div>
+<ul>
+  <li>一次临时促销把需求<strong>提前透支</strong>：当天多卖，之后两三天少卖（$\theta$ 为负）。</li>
+  <li>仓库某天爆仓，积压的订单在随后两天陆续发出（$\theta$ 为正）。</li>
+  <li>对数据做了差分之后，差分本身会引入 MA 结构——这是上一章差分实验里"滞后 1 负相关"的来源。</li>
+</ul></div>
+<div class="demo" id="ma-demo">
+  <div class="demo-title">🧪 实验：MA 模拟器</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="190"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">ACF</div><div class="chart" data-h="180"></div></div>
+      <div><div class="chart-cap">PACF</div><div class="chart" data-h="180"></div></div>
+    </div>
+    <div class="chart-cap">一次冲击的影响如何随时间消散（脉冲响应）</div>
+    <div class="chart" data-h="150"></div>
+    <div class="readout"></div>
+    <p class="hint">脉冲响应图最直观：MA(1) 的冲击只有 2 根柱子（当期和下一期），之后归零。对应地，<strong>ACF 在 q 阶后截尾，PACF 拖尾</strong>——和 AR 正好相反。把 θ₂ 调成非零，ACF 的显著柱子变成 2 根。</p>
+  </div>
+</div>
+</section>
+
+<section id="identify">
+<h2>定阶：从 ACF / PACF 读出 p 和 q</h2>
+<div class="tw"><table>
+<thead><tr><th>模型</th><th>ACF</th><th>PACF</th></tr></thead>
+<tbody>
+<tr><td><strong>AR(p)</strong></td><td>拖尾（逐渐衰减）</td><td><strong>p 阶后截尾</strong></td></tr>
+<tr><td><strong>MA(q)</strong></td><td><strong>q 阶后截尾</strong></td><td>拖尾</td></tr>
+<tr><td><strong>ARMA(p,q)</strong></td><td>拖尾</td><td>拖尾</td></tr>
+<tr><td>白噪声</td><td>全在带内</td><td>全在带内</td></tr>
+</tbody></table></div>
+<p>"截尾"指某一阶之后突然全部落进虚线带；"拖尾"指逐渐衰减、没有明确的截断点。两张图都拖尾时无法直接读出阶数，就从 ARMA(1,1) 试起，用后面讲的信息准则来选。</p>
+<div class="demo" id="game">
+  <div class="demo-title">🎮 定阶小游戏：看图猜模型</div>
+  <div class="demo-body">
+    <div class="grid2">
+      <div><div class="chart-cap">ACF</div><div class="chart" data-h="200"></div></div>
+      <div><div class="chart-cap">PACF</div><div class="chart" data-h="200"></div></div>
+    </div>
+    <div class="chart-cap" style="margin-top:12px">这条序列是由哪种模型生成的？</div>
+    <div class="ctl"></div>
+    <div class="readout"></div>
+  </div>
+</div>
+</section>
+
+<section id="i">
+<h2>I：差分，以及几个你已经认识的特例</h2>
+<p>ARIMA 里的 "I"（Integrated）就是上一章的差分。有意思的是，前面学过的好几个方法其实都是 ARIMA 的特例：</p>
+<div class="tw"><table>
+<thead><tr><th>ARIMA 记号</th><th>等价于</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>ARIMA(0,0,0)</td><td>白噪声（+ 均值）</td><td>预测 = 均值法</td></tr>
+<tr><td>ARIMA(0,1,0)</td><td>随机游走</td><td>预测 = 朴素法</td></tr>
+<tr><td>ARIMA(0,1,0) + 常数</td><td>带漂移的随机游走</td><td>预测 = 漂移法</td></tr>
+<tr><td>ARIMA(0,1,1)</td><td>简单指数平滑</td><td>$\alpha = 1 + \theta_1$</td></tr>
+<tr><td>ARIMA(0,2,2)</td><td>Holt 线性趋势</td><td></td></tr>
+<tr><td>ARIMA(0,0,0)(0,1,0)<sub>m</sub></td><td>季节朴素法</td><td></td></tr>
+</tbody></table></div>
+<p>所以 ARIMA 和指数平滑不是对立的两派，而是有很大重叠的两个家族：线性的指数平滑模型都能写成 ARIMA；反过来，ARIMA 有 AR 项和更灵活的阶数，而指数平滑有乘法季节这类非线性形式。</p>
+</section>
+
+<section id="bj">
+<h2>Box–Jenkins 建模流程</h2>
+<p>ARIMA 建模有一套经典的迭代流程，点击每一步查看。</p>
+<div id="flow"></div>
+</section>
+
+<section id="fit">
+<h2>ARIMA / SARIMA 拟合台</h2>
+<p>有季节的数据要用<strong>季节 ARIMA（SARIMA）</strong>，记作 ARIMA$(p,d,q)(P,D,Q)_m$。大写的三个数是同样的三块积木，只是作用在<strong>季节滞后</strong>上：$P$ 是"和上个周期同一位置"的自回归，$D$ 是季节差分，$Q$ 是季节滞后上的冲击回声。</p>
+$$\underbrace{\phi(B)}_{\text{AR}}\;\underbrace{\Phi(B^m)}_{\text{季节 AR}}\;\underbrace{(1-B)^d}_{\text{差分}}\;\underbrace{(1-B^m)^D}_{\text{季节差分}}\;y_t \;=\; \underbrace{\theta(B)}_{\text{MA}}\;\underbrace{\Theta(B^m)}_{\text{季节 MA}}\;\varepsilon_t$$
+<p class="small muted">$B$ 是"后移算子"：$B\,y_t = y_{t-1}$，$B^m y_t = y_{t-m}$。这个式子只是把"先差分、再 AR、右边 MA"紧凑地写在一行里。</p>
+<div class="demo" id="fit-demo">
+  <div class="demo-title">🧪 实验：亲手拟合一个 ARIMA</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="chart-cap">残差的 ACF（应全部落在虚线带内）</div>
+    <div class="chart" data-h="170"></div>
+    <div class="readout"></div>
+    <p class="hint">默认是月度数据上经典的"航空模型" ARIMA(0,1,1)(0,1,1)₁₂。试着破坏它：① 把 D 调成 0、Q 调成 0——残差 ACF 在 12、24 处冒出高柱，Ljung-Box 报警，预测也丢了季节形状；② 把 d 调成 0——预测不再跟随趋势；③ 把 p、q 都加到 3——AIC 不降反升，测试误差也没改善：<strong>参数多不等于好</strong>。再换到"电商日销量"试试 (1,0,1)(0,1,1)₇：残差诊断合格，但测试误差未必能明显胜过季节朴素法（对比右边的基线 MAE）——训练数据里的促销尖峰是它看不见原因的"冲击"，会干扰估计和预测。本章后面的 ARIMAX 实验专门解决这个问题。</p>
+  </div>
+</div>
+<div class="callout key">
+  <div class="hd">怎么看拟合结果</div>
+  <ul>
+    <li><strong>残差 ACF + Ljung-Box</strong>：p 值 &gt; 0.05 表示"看不出残差里还有规律"，模型合格；p 值很小说明还有结构没抓到，要改阶数。</li>
+    <li><strong>AIC</strong>：越小越好，用于<em>同一份数据、相同差分阶数</em>的模型之间比较。</li>
+    <li><strong>预测区间随步长变宽</strong>：每多预测一步，就多累积一份未知的未来冲击。有差分（d ≥ 1）时区间会无限变宽；平稳模型的区间会收敛到一个固定宽度。</li>
+    <li><strong>测试集误差</strong>才是最终裁判：AIC 最低的模型未必预测最准。</li>
+  </ul>
+</div>
+<details class="code"><summary>原理补充：参数是怎么估计出来的</summary>
+<pre><code>给定一组系数 (φ, θ)，可以从头到尾"重放"一遍数据，递推出每一期的冲击：
+
+    e_t = y_t − (φ1·y_{t-1} + … ) − (θ1·e_{t-1} + … )
+
+e_t 就是"模型没预料到的部分"（一步预测误差）。
+
+· 条件平方和（CSS）：找让 Σ e_t² 最小的系数            ← 本页面用的方法
+· 极大似然（MLE）   ：假设 e_t 服从正态分布，找让数据出现概率最大的系数
+                      （statsmodels 默认，用卡尔曼滤波精确计算）
+
+两者在数据较长时结果几乎相同。因为 e_t 依赖 e_{t-1}（递归），目标函数对系数
+不是二次的，没有解析解，只能用数值优化一步步搜索。
+
+AIC = −2·log(似然) + 2·(参数个数)：拟合越好第一项越小，参数越多第二项越大。</code></pre></details>
+</section>
+
+<section id="auto">
+<h2>自动定阶：让信息准则来选</h2>
+<p>看图定阶需要经验，而且 ARMA 混合模型的图往往读不出来。实际工作中更常用的是：<strong>差分阶数用检验确定，然后在一个网格里遍历 p 和 q，选 AIC 最低的</strong>。这就是 <code>auto_arima</code> 做的事。</p>
+<div class="demo" id="auto-demo">
+  <div class="demo-title">🧪 实验：p × q 网格搜索</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="260"></div>
+    <div class="readout"></div>
+    <p class="hint">每个格子是一个模型的 AIC，颜色越深越好。通常能看到两个现象：好的模型不止一个——一片区域的 AIC 都差不多（这时选其中最简单的）；右下角参数最多的模型 AIC 并不是最低的。再对比"AIC 选出的模型"和"测试误差最低的模型"：它们常常不是同一个，但测试误差相差不大。</p>
+  </div>
+</div>
+</section>
+
+<section id="arimax">
+<h2>加入外部变量：ARIMAX / 动态回归</h2>
+<p>ARIMA 只用序列自己的历史，所以它<strong>不知道明天有促销</strong>。把外部变量加进来的标准做法是"回归 + ARIMA 误差"：</p>
+$$y_t = \beta_1 x_{1,t} + \cdots + \beta_k x_{k,t} + \eta_t,\qquad \eta_t \sim \text{ARIMA}$$
+<p>回归部分解释"促销让销量变成几倍"，剩下的 $\eta_t$（去掉事件影响后的日常波动）交给 ARIMA。预测时把未来的促销计划代进去即可。</p>
+<div class="demo" id="arimax-demo">
+  <div class="demo-title">🧪 实验：告诉模型"下周有促销"</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">测试段里有一次 3 天的小促。不带外部变量的 SARIMA 完全预见不到那个尖峰；勾选"加入促销日历"后，模型从历史上学到了各类活动的平均效应，并把它加到了对应的日子上。下面的表顺便给出了一个很有业务价值的副产品：<strong>每类活动的增量效应估计</strong>。</p>
+  </div>
+</div>
+<div class="callout warn"><div class="hd">⚠️ 使用外部变量的前提</div>
+<ul>
+  <li>预测时必须<strong>知道外部变量未来的值</strong>：促销计划、节假日可以；实际天气、竞品价格不行（只能用它们的预报，预报误差会传导进来）。</li>
+  <li>回归系数是"平均效应"：假设每次小促的效果相同。促销力度差别大时，要用更细的特征（折扣深度、资源位），这正是下一章机器学习方法的强项。</li>
+</ul></div>
+</section>
+
+<section id="limits">
+<h2>优点、局限与使用建议</h2>
+<div class="cards">
+  <div class="card"><h4>✅ 优点</h4><p>理论成熟、可解释（每个系数都有含义）；自带预测区间和诊断工具；数据不长（几十到几百个点）也能用；短期预测很强。</p></div>
+  <div class="card"><h4>⚠️ 局限</h4><p>只能表达线性关系；只支持一个季节周期，且周期很长（日数据的年季节 m=365）时难以估计；每条序列单独建模，序列之间不能互相借力；对异常值和结构突变敏感。</p></div>
+  <div class="card"><h4>🧭 什么时候用</h4><p>序列数量不多、每条都重要（如公司级月度营收）；需要可解释和区间；作为机器学习/深度学习模型必须打败的强基线。</p></div>
+</div>
+<details class="code" open><summary>Python 参考代码：SARIMAX、诊断、自动定阶、外部变量</summary>
+<pre><code>import numpy as np
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+train, test = np.log(y[:-28]), y[-28:]                 # 对数变换稳定方差
+
+# ---------- 手动指定阶数 ----------
+model = SARIMAX(train, order=(1, 0, 1), seasonal_order=(0, 1, 1, 7)).fit(disp=False)
+print(model.summary())                                 # 系数、标准误、AIC
+print(acorr_ljungbox(model.resid, lags=[14], model_df=3))   # 残差是否白噪声
+model.plot_diagnostics(figsize=(10, 6))                # 残差图 / 直方图 / QQ 图 / ACF
+
+fc = model.get_forecast(28)
+mean = np.exp(fc.predicted_mean)                       # 逆变换回原尺度
+band = np.exp(fc.conf_int(alpha=0.05))
+
+# ---------- 自动定阶 ----------
+import pmdarima as pm
+auto = pm.auto_arima(train, seasonal=True, m=7, d=None, D=1,
+                     max_p=3, max_q=3, max_P=1, max_Q=1,
+                     information_criterion="aicc", stepwise=True, trace=True)
+print(auto.order, auto.seasonal_order)
+
+# 大批量序列用 statsforecast，速度快几个数量级
+from statsforecast import StatsForecast
+from statsforecast.models import AutoARIMA
+sf = StatsForecast(models=[AutoARIMA(season_length=7)], freq="D", n_jobs=-1)
+
+# ---------- 外部变量（促销、节假日） ----------
+X_train, X_future = X[:-28], X[-28:]                   # 每列一个 0/1 事件标记；未来值必须已知
+mx = SARIMAX(train, exog=X_train, order=(1, 0, 1), seasonal_order=(0, 1, 1, 7)).fit(disp=False)
+fc_x = np.exp(mx.get_forecast(28, exog=X_future).predicted_mean)
+print(np.exp(mx.params[:X.shape[1]]) - 1)              # 各事件的增量效应（百分比）</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>AR = 对自己过去值的回归（惯性）；MA = 过去冲击的余波（回声）；I = 差分（趋势）。</li>
+  <li>AR(p)：ACF 拖尾、PACF p 阶截尾；MA(q)：ACF q 阶截尾、PACF 拖尾。</li>
+  <li>朴素法、漂移法、SES、Holt 都是 ARIMA 的特例。</li>
+  <li>流程：变换 → 差分至平稳 → 定阶 → 估计 → 残差诊断（应为白噪声）→ 预测。</li>
+  <li>SARIMA 的 $(P,D,Q)_m$ 是作用在季节滞后上的同一套积木。</li>
+  <li>AIC 在拟合优度和复杂度之间折中；最终以回测误差为准。</li>
+  <li>ARIMAX 用回归项引入促销、节假日等已知的未来信息。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+function corrBars(vals, n, name, slot) {
+  const band = 1.96 / Math.sqrt(n), ser = S.bar(name, vals.slice(1).map(v => +v.toFixed(3)), { c: slot || 0, maxW: 10 });
+  ser.markLine = S.hline([band, -band], { c: Site.pal().muted });
+  return { xAxis: { data: vals.slice(1).map((_, i) => i + 1) }, yAxis: { min: -1, max: 1, scale: false }, legend: false, series: [ser] };
+}
+const stationary2 = (a, b) => Math.abs(b) < 1 && a + b < 1 && b - a < 1; // AR(2) 平稳域（MA 的可逆域把系数取负后相同）
+
+/* ---------- AR / MA 模拟器（同一套代码） ---------- */
+function armaDemo(id, kind) {
+  const isAR = kind === 'ar', sym = isAR ? 'φ' : 'θ';
+  Site.demo(id, {
+    controls: [
+      { k: 'c1', label: sym + '₁', min: isAR ? -1.5 : -0.95, max: isAR ? 1.5 : 0.95, step: 0.05, value: 0.7, fmt: v => v.toFixed(2) },
+      { k: 'c2', label: sym + '₂', min: -0.95, max: 0.95, step: 0.05, value: 0, fmt: v => v.toFixed(2) },
+      { act: 'regen', label: '🎲 换一组随机冲击', run: s => { s.seed = (s.seed || 1) + 1; } },
+    ],
+    render(s, d) {
+      const n = 400, K = 20, co = s.c2 !== 0 ? [s.c1, s.c2] : [s.c1], ok = isAR ? stationary2(s.c1, s.c2) : stationary2(-s.c1, -s.c2);
+      let x;
+      if (isAR && !ok) { const r = TS.rng(s.seed || 1); x = [0, 0]; for (let t = 2; t < 60; t++) x.push(s.c1 * x[t - 1] + s.c2 * x[t - 2] + r.n()); }
+      else x = TS.simArma(n, isAR ? co : [], isAR ? [] : co, TS.rng((s.seed || 1) + (isAR ? 0 : 50)));
+      d.chart(0, { xAxis: { data: x.map((_, i) => i + 1) }, yAxis: {}, legend: false, tooltip: false, series: [S.line('模拟序列', x.slice(0, 200).map(v => +v.toFixed(2)), { c: 0, w: 1.3 })] });
+      d.chart(1, corrBars(TS.acf(x, K), x.length, 'ACF', 0));
+      d.chart(2, corrBars(TS.pacf(x, K), x.length, 'PACF', 6));
+      const psi = [1]; for (let j = 1; j <= 20; j++) psi.push(isAR ? (s.c1 * psi[j - 1] + (j >= 2 ? s.c2 * psi[j - 2] : 0)) : (j === 1 ? s.c1 : j === 2 ? s.c2 : 0));
+      d.chart(3, { xAxis: { data: psi.map((_, j) => (j === 0 ? '当期' : '+' + j)) }, yAxis: {}, legend: false, series: [S.bar('冲击的影响', psi.map(v => +Math.max(-50, Math.min(50, v)).toFixed(3)), { c: 2, maxW: 14 })] });
+      const order = s.c2 !== 0 ? 2 : 1, tiles = [['模型', (isAR ? 'AR(' : 'MA(') + order + ')'], [isAR ? '平稳性' : '可逆性', ok ? (isAR ? '平稳' : '可逆') : (isAR ? '不平稳（爆炸）' : '不可逆'), isAR ? '系数落在平稳域内才行' : '可逆 = 能唯一地从数据反推出冲击', ok ? 'good' : 'bad']];
+      if (isAR) {
+        const disc = s.c1 * s.c1 + 4 * s.c2;
+        tiles.push(['动态类型', disc < 0 ? '伪周期振荡' : s.c1 < 0 && s.c2 === 0 ? '锯齿振荡' : '单调衰减', disc < 0 && ok ? '平均周期约 ' + (2 * Math.PI / Math.acos(s.c1 / (2 * Math.sqrt(-s.c2)))).toFixed(1) + ' 步' : '']);
+        tiles.push(['冲击持续', ok ? '逐渐衰减，理论上永不为 0' : '越滚越大']);
+      } else tiles.push(['冲击持续', order + ' 期', '之后完全消失'], ['理论 ACF(1)', ((s.c1 + s.c1 * s.c2) / (1 + s.c1 * s.c1 + s.c2 * s.c2)).toFixed(2), 'MA(1) 的 ACF(1) 绝对值最大只有 0.5']);
+      d.out(Site.tiles(tiles));
+    },
+  });
+}
+armaDemo('ar-demo', 'ar');
+armaDemo('ma-demo', 'ma');
+
+/* ---------- 定阶小游戏 ---------- */
+const POOL = [
+  ['AR(1)', [0.75], [], 'PACF 只有第 1 根显著（截尾），ACF 逐渐衰减（拖尾）。'],
+  ['AR(1)', [-0.65], [], 'PACF 只有第 1 根显著且为负，ACF 正负交替地衰减。'],
+  ['AR(2)', [0.5, 0.35], [], 'PACF 前 2 根显著后截尾，ACF 拖尾。'],
+  ['AR(2)', [1.0, -0.55], [], 'ACF 呈衰减的波浪形（伪周期），PACF 在 2 阶后截尾。'],
+  ['MA(1)', [], [0.8], 'ACF 只有第 1 根显著（截尾），PACF 正负交替地拖尾。'],
+  ['MA(1)', [], [-0.7], 'ACF 只有第 1 根显著且为负，PACF 拖尾。'],
+  ['MA(2)', [], [0.6, 0.55], 'ACF 前 2 根显著后截尾，PACF 拖尾。'],
+  ['ARMA(1,1)', [0.75], [0.6], 'ACF 和 PACF 都是逐渐衰减，没有明确的截断点。'],
+  ['白噪声', [], [], '两张图的柱子都落在虚线带内（偶尔一根略微出界属正常）。'],
+];
+const ANS = ['AR(1)', 'AR(2)', 'MA(1)', 'MA(2)', 'ARMA(1,1)', '白噪声'];
+Site.demo('game', {
+  controls: ANS.map(a => ({ act: 'a' + a, label: a, run: s => { if (!s.guess) { s.total++; if (a === s.truth) s.right++; } s.guess = a; } }))
+    .concat([{ act: 'next', label: '下一题 ▶', primary: true, run: s => { s.q++; s.guess = null; } }]),
+  setup(s) { s.q = 0; s.right = 0; s.total = 0; s.guess = null; },
+  render(s, d) {
+    const r = TS.rng(31 + s.q * 7), m = POOL[(r.int(0, 999) + s.q * 4) % POOL.length], x = TS.simArma(600, m[1], m[2], r);
+    s.truth = m[0];
+    d.chart(0, corrBars(TS.acf(x, 16), 600, 'ACF', 0));
+    d.chart(1, corrBars(TS.pacf(x, 16), 600, 'PACF', 6));
+    const score = `<span class="tag">得分 ${s.right} / ${s.total}</span>`;
+    if (!s.guess) d.out(`第 ${s.q + 1} 题 ${score}　<span class="muted">提示：先看哪张图"截尾"。</span>`);
+    else d.out(`<div class="callout ${s.guess === s.truth ? 'tip' : 'warn'}" style="margin:0"><strong>${s.guess === s.truth ? '✓ 答对了' : '✗ 你选的是 ' + s.guess}，正确答案：${s.truth}</strong>${m[1].length || m[2].length ? '（真实系数 ' + [].concat(m[1].map(v => 'φ=' + v), m[2].map(v => 'θ=' + v)).join('，') + '）' : ''}。${m[3]} ${score}</div>`);
+  },
+});
+
+/* ---------- Box–Jenkins ---------- */
+Site.flow('flow', [
+  { t: '① 画图与变换', d: '<p>看趋势、季节、方差是否稳定。波动随水平放大就先取对数。<a href="02-eda.html">第 02 章</a>的工具都用在这里。</p>' },
+  { t: '② 差分至平稳', d: '<p>有趋势做一阶差分（d），有季节做季节差分（D）。用 ADF/KPSS 和 ACF 确认；注意别差分过头（<a href="04-stationarity.html">第 04 章</a>）。</p>' },
+  { t: '③ 定阶', d: '<p>在差分后的平稳序列上看 ACF/PACF：PACF 在 p 阶截尾 → AR(p)；ACF 在 q 阶截尾 → MA(q)；季节滞后处（m、2m）的柱子决定 P、Q。看不出来就用信息准则在小网格里搜。</p>' },
+  { t: '④ 估计参数', d: '<p>用极大似然（或条件平方和）求系数。软件一行代码完成。关注：系数是否显著、是否接近平稳/可逆的边界（接近 ±1 往往说明差分阶数不对）。</p>' },
+  { t: '⑤ 残差诊断', d: '<p>残差应是白噪声：ACF 落在带内、Ljung-Box 的 p 值不小、没有明显异常点。<strong>不合格就回到第 ③ 步改阶数</strong>——这是一个迭代过程。</p>' },
+  { t: '⑥ 回测与预测', d: '<p>诊断合格只说明"样本内没有剩余规律"。还要用<a href="05-evaluation.html">滚动回测</a>确认样本外的预测确实优于基线，然后再用全部数据重新拟合并预测。</p>' },
+], 0);
+
+/* ---------- 拟合台 ---------- */
+const FIT_DATA = {
+  monthly: () => { const ds = TS.data.monthly(); return { m: 12, unit: '万元', x: ds.dates, train: ds.y.slice(0, 96), test: ds.y.slice(96), show: 72, def: [0, 1, 1, 0, 1, 1] }; },
+  retail: () => { const ds = TS.data.retail(); return { m: 7, unit: '件', x: ds.dates.slice(612, 1004), train: ds.y.slice(612, 976), test: ds.y.slice(976, 1004), show: 70, def: [1, 0, 1, 0, 1, 1] }; },
+  dau: () => { const ds = TS.data.dau(); return { m: 7, unit: '人', x: ds.dates.slice(0, 460), train: ds.y.slice(0, 432), test: ds.y.slice(432, 460), show: 70, def: [0, 1, 1, 0, 1, 1] }; },
+  stock: () => { const ds = TS.data.stock(); return { m: 5, unit: '元', x: ds.dates, train: ds.y.slice(0, 480), test: ds.y.slice(480), show: 100, def: [0, 1, 0, 0, 0, 0] }; },
+};
+const ORD = ['p', 'd', 'q', 'P', 'D', 'Q'];
+Site.demo('fit-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'select', options: [['monthly', '月度销售额（m=12）'], ['retail', '电商日销量（m=7）'], ['dau', 'App 日活（m=7）'], ['stock', '股价（随机游走）']] },
+    { k: 'log', label: '先取对数', type: 'check', value: true },
+    { k: 'p', label: 'p（AR 阶数）', min: 0, max: 3, step: 1, value: 0 }, { k: 'd', label: 'd（差分次数）', min: 0, max: 2, step: 1, value: 1 }, { k: 'q', label: 'q（MA 阶数）', min: 0, max: 3, step: 1, value: 1 },
+    { k: 'P', label: 'P（季节 AR）', min: 0, max: 1, step: 1, value: 0 }, { k: 'D', label: 'D（季节差分）', min: 0, max: 1, step: 1, value: 1 }, { k: 'Q', label: 'Q（季节 MA）', min: 0, max: 1, step: 1, value: 1 },
+  ],
+  render(s, d, changed) {
+    const D = FIT_DATA[s.ds](), m = D.m, h = D.test.length, n = D.train.length;
+    if (changed === 'ds') D.def.forEach((v, i) => d.set(ORD[i], v)); // 切换数据时载入该数据的经典阶数
+    const tf = s.log ? Math.log : v => v, inv = s.log ? Math.exp : v => v;
+    let fit;
+    try { fit = TS.arima(D.train.map(tf), { p: s.p, d: s.d, q: s.q, P: s.P, D: s.D, Q: s.Q, s: m }); }
+    catch (e) { d.out(`<span class="tag bad">${Site.esc(e.message)}</span>`); return; }
+    const fc = fit.forecast(h), mean = fc.mean.map(inv), v0 = n - D.show, pad = new Array(D.show).fill(null), k = s.p + s.q + s.P + s.Q;
+    d.chart(0, { xAxis: { data: D.x.slice(v0) }, yAxis: { name: D.unit },
+      series: [S.line('训练数据', D.train.slice(v0).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }), S.line('实际（测试段）', pad.concat(D.test), { c: 0, op: 0.4 }),
+        S.line('预测', pad.concat(mean.map(v => +v.toFixed(1))), { c: 1, dash: true, w: 2.5 }), ...S.band(pad.concat(fc.lo.map(inv)), pad.concat(fc.hi.map(inv)), { c: 1 })] });
+    const K = Math.min(Math.max(2 * m, 20), 28), lb = TS.ljungBox(fit.resid, K, k);
+    d.chart(1, corrBars(TS.acf(fit.resid, K), fit.resid.length, '残差 ACF', 6));
+    const mt = TS.metrics(D.test, mean, { train: D.train, m }), sn = TS.metrics(D.test, TS.fc.snaive(D.train, h, m)), nv = TS.metrics(D.test, TS.fc.naive(D.train, h));
+    const co = [].concat(fit.coef.ar.map((v, i) => `φ${i + 1}=${v.toFixed(2)}`), fit.coef.ma.map((v, i) => `θ${i + 1}=${v.toFixed(2)}`), fit.coef.sar.map(v => `Φ=${v.toFixed(2)}`), fit.coef.sma.map(v => `Θ=${v.toFixed(2)}`));
+    const name = `ARIMA(${s.p},${s.d},${s.q})` + (s.P || s.D || s.Q ? `(${s.P},${s.D},${s.Q})<sub>${m}</sub>` : '');
+    d.out(Site.tiles([
+      ['模型', name, co.length ? co.join('　') : '没有需要估计的系数'],
+      ['AIC', fit.aic.toFixed(1), '越小越好（只在 d、D 相同时可比）'],
+      ['Ljung-Box p 值', lb.p < 0.001 ? '< 0.001' : lb.p.toFixed(3), lb.p > 0.05 ? '残差像白噪声 ✓' : '残差里还有规律', lb.p > 0.05 ? 'good' : 'bad'],
+      ['测试集 MAE', mt.mae, D.unit, mt.mae < Math.min(sn.mae, nv.mae) ? 'good' : 'bad'],
+      ['测试集 WAPE', Site.pct(mt.wape)],
+      ['基线的测试 MAE', Site.fmt(Math.min(sn.mae, nv.mae)), sn.mae < nv.mae ? '季节朴素法' : '朴素法'],
+    ]));
+  },
+});
+
+/* ---------- 网格搜索 ---------- */
+Site.demo('auto-demo', {
+  controls: [{ k: 'ds', label: '数据', type: 'seg', options: [['monthly', '月度销售额'], ['retail', '电商日销量'], ['dau', 'App 日活']] }],
+  render(s, d) {
+    const D = FIT_DATA[s.ds](), m = D.m, h = D.test.length, p = Site.pal(), dd = D.def[1];
+    if (!s.cache || s.cache.ds !== s.ds) {
+      const tr = D.train.map(Math.log), cells = [];
+      for (let pp = 0; pp <= 3; pp++) for (let qq = 0; qq <= 3; qq++) {
+        try { const f = TS.arima(tr, { p: pp, d: dd, q: qq, P: 0, D: 1, Q: 1, s: m }); cells.push({ p: pp, q: qq, aic: f.aic, mae: TS.metrics(D.test, f.forecast(h).mean.map(Math.exp)).mae }); }
+        catch (e) { cells.push({ p: pp, q: qq, aic: NaN, mae: NaN }); }
+      }
+      s.cache = { ds: s.ds, cells };
+    }
+    const cells = s.cache.cells.filter(c => Number.isFinite(c.aic)), bestA = cells.reduce((a, b) => (b.aic < a.aic ? b : a)), bestM = cells.reduce((a, b) => (b.mae < a.mae ? b : a));
+    const lo = bestA.aic, hi = Math.max(...cells.map(c => c.aic));
+    d.chart(0, {
+      xAxis: { type: 'category', data: [0, 1, 2, 3].map(v => 'q=' + v), splitLine: { show: false } }, yAxis: { type: 'category', data: [0, 1, 2, 3].map(v => 'p=' + v), splitLine: { show: false } }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `p=${q.value[1]}, q=${q.value[0]}<br>AIC <b>${q.value[2].toFixed(1)}</b><br>测试 MAE ${Site.fmt(q.value[3])}` },
+      visualMap: { show: false, min: lo, max: lo + Math.max(6, (hi - lo) * 0.6), dimension: 2, inRange: { color: p.seq.slice().reverse().slice(0, 5) } },
+      series: [{ type: 'heatmap', name: 'AIC', data: cells.map(c => [c.q, c.p, +c.aic.toFixed(2), c.mae]), itemStyle: { borderColor: p.surface, borderWidth: 2 },
+        label: { show: true, color: p.ink, fontSize: 11, textBorderColor: p.surface, textBorderWidth: 2, formatter: q => q.value[2].toFixed(1) + (q.value[1] === bestA.p && q.value[0] === bestA.q ? ' ★' : '') } }],
+    });
+    const nm = c => `(${c.p},${dd},${c.q})(0,1,1)<sub>${m}</sub>`, near = cells.filter(c => c.aic - lo < 2).length;
+    d.out(Site.tiles([
+      ['AIC 最低的模型 ★', nm(bestA), `AIC ${bestA.aic.toFixed(1)}，测试 MAE ${Site.fmt(bestA.mae)}`, 'good'],
+      ['测试误差最低的模型', nm(bestM), `AIC ${bestM.aic.toFixed(1)}，测试 MAE ${Site.fmt(bestM.mae)}`],
+      ['与最优 AIC 相差不到 2 的模型', near + ' 个', '统计上难分高下，选最简单的'],
+    ]));
+  },
+});
+
+/* ---------- ARIMAX ---------- */
+const TAGS = ['小促', '618预热', '618', '双11预热', '双11', '年货节', '春节'];
+Site.demo('arimax-demo', {
+  controls: [{ k: 'x', label: '加入促销日历（回归 + ARIMA 误差）', type: 'check', value: false }],
+  setup(s) {
+    const ds = TS.data.retail(), a = 300, cut = 990, h = 28, ly = ds.y.map(Math.log), ord = { p: 1, d: 0, q: 1, P: 0, D: 1, Q: 1, s: 7 };
+    // 第一步：对数销量 ~ 截距 + 时间 + 星期 + 各类事件；事件系数 = 该事件的对数增量
+    const row = i => { const r = [1, (i - a) / 365]; for (let k = 1; k < 7; k++) r.push(+(TS.dow(ds.dates[i]) === k)); TAGS.forEach(t => r.push(+(ds.event[i] === t))); return r; };
+    const X = [], Y = []; for (let i = a; i < cut; i++) { X.push(row(i)); Y.push(ly[i]); }
+    const beta = TS.ols(X, Y).beta.slice(8), eff = i => TAGS.reduce((sum, t, k) => sum + (ds.event[i] === t ? beta[k] : 0), 0);
+    // 第二步：去掉事件效应后的序列交给 SARIMA；预测时再把未来的事件效应加回去
+    const adj = []; for (let i = a; i < cut; i++) adj.push(ly[i] - eff(i));
+    const fx = TS.arima(adj, ord).forecast(h).mean.map((v, j) => Math.exp(v + eff(cut + j)));
+    const f0 = TS.arima(ly.slice(a, cut), ord).forecast(h).mean.map(Math.exp);
+    s.r = { ds, cut, h, beta, fx, f0, actual: ds.y.slice(cut, cut + h) };
+  },
+  render(s, d) {
+    const { ds, cut, h, beta, fx, f0, actual } = s.r, v0 = cut - 49, pad = new Array(49).fill(null), p = Site.pal();
+    const act = S.line('实际（测试段）', pad.concat(actual), { c: 0, op: 0.45 });
+    const promo = []; for (let j = 0; j < h; j++) if (ds.event[cut + j]) promo.push(cut + j);
+    if (promo.length) act.markArea = S.areas([[ds.dates[promo[0]], ds.dates[promo[promo.length - 1]], '已排期的促销', 3]]);
+    const series = [S.line('训练数据', ds.y.slice(v0, cut).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }), act, S.line('SARIMA（不知道有促销）', pad.concat(f0.map(Math.round)), { c: 7, dash: true })];
+    if (s.x) series.push(S.line('ARIMAX（知道促销计划）', pad.concat(fx.map(Math.round)), { c: 2, w: 2.5 }));
+    d.chart(0, { xAxis: { data: ds.dates.slice(v0, cut + h) }, yAxis: { name: '件' }, series });
+    const m0 = TS.metrics(actual, f0), mx = TS.metrics(actual, fx), pe = f => { const i = promo.map(q => q - cut); return TS.sum(i.map(j => f[j])) / TS.sum(i.map(j => actual[j])) - 1; };
+    let html = Site.tiles([
+      ['SARIMA · 测试 MAE', m0.mae, '促销那几天偏差 ' + Site.pct(pe(f0)), 'bad'],
+      ['ARIMAX · 测试 MAE', s.x ? mx.mae : '勾选上面的选项', s.x ? '促销那几天偏差 ' + Site.pct(pe(fx)) : '', s.x ? 'good' : ''],
+    ]);
+    if (s.x) html += '<div class="chart-cap">模型估计的各类活动效应（相对于没有活动的正常水平）</div>' + Site.table(['活动', '估计的销量倍数', '增量'], TAGS.map((t, k) => [t, Math.exp(beta[k]).toFixed(2) + ' 倍', (beta[k] >= 0 ? '+' : '') + Site.pct(Math.exp(beta[k]) - 1, 0)]), { num: [1, 2] });
+    d.out(html);
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '一条平稳序列的 PACF 在滞后 2 之后突然全部落入虚线带内，ACF 则缓慢衰减。最合适的初始模型是？', opts: ['MA(2)', 'AR(2)', 'ARMA(2,2)', '白噪声'], ans: 1, why: 'PACF 在 p 阶后截尾、ACF 拖尾，是 AR(p) 的指纹。' },
+  { q: 'ARIMA(0,1,1) 与下面哪种方法等价？', opts: ['季节朴素法', '简单指数平滑', 'Holt-Winters', '移动平均平滑'], ans: 1, why: '对一阶差分建 MA(1)，展开后正是指数加权的形式，α = 1 + θ。' },
+  { q: '拟合 ARIMA 后，残差的 Ljung-Box 检验 p 值为 0.002。这意味着？', opts: ['模型很好，可以直接使用', '残差中仍有显著的自相关，模型遗漏了某些规律，应调整阶数', '数据不平稳', '预测区间太宽'], ans: 1, why: 'Ljung-Box 的原假设是"残差无自相关"。p 值很小 → 拒绝 → 残差不是白噪声 → 还有可以利用的结构。' },
+  { q: '月度数据的 ARIMA(1,1,1)(0,1,1)₁₂ 中，"(0,1,1)₁₂" 表示什么？', opts: ['做 12 次差分', '做一次滞后 12 的季节差分，并在滞后 12 处加一个季节 MA 项', '用 12 个 AR 项', '预测 12 步'], ans: 1, why: '(P,D,Q)ₘ 是作用在季节滞后上的三块积木：这里 P=0，D=1（季节差分 y_t − y_{t−12}），Q=1（滞后 12 的 MA 项）。' },
+  { q: '用纯 ARIMA 预测销量，但下周有一场已经排期的大促。最合理的做法是？', opts: ['增大 p 和 q', '把促销日历作为外部变量加入（ARIMAX / 动态回归）', '多做一次差分', '什么都不用做，ARIMA 会自动预测到'], ans: 1, why: 'ARIMA 只看历史值，无法知道未来的计划事件。已知的未来信息应通过回归项引入。' },
+]);
+</script>
+</body>
+</html>
