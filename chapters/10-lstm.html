@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>10 LSTM · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="10">
+<main>
+<p class="lead">MLP 把一个窗口的数据"摊平"后一口吞下，并不知道哪个数在前哪个在后。<strong>循环神经网络（RNN）</strong>换了一种读法：像人读句子一样，<strong>按时间顺序一步一步读，边读边更新脑子里的"记忆"</strong>。LSTM 是 RNN 中最成功的一种，它用三个"门"解决了普通 RNN 记不住长期信息的问题，至今仍是时间序列深度学习里最常用的基础模型。</p>
+
+<section id="rnn">
+<h2>RNN：带记忆的神经网络</h2>
+<p>RNN 维护一个<strong>隐藏状态</strong> $h_t$——可以理解为"读到目前为止的摘要"。每来一个新输入，就用它和旧的摘要一起算出新的摘要：</p>
+$$h_t = \tanh\!\big(W_x\,x_t + W_h\,h_{t-1} + b\big)$$
+<p>关键点有两个：</p>
+<ul>
+  <li><strong>同一组参数在每个时间步重复使用</strong>（参数共享）。所以序列多长都能处理，参数量也不随长度增加。</li>
+  <li>$h_t$ 依赖 $h_{t-1}$，$h_{t-1}$ 又依赖 $h_{t-2}$……所以理论上 $h_t$ 包含了之前所有输入的信息。</li>
+</ul>
+<svg class="diagram" viewBox="0 0 720 150" role="img" aria-label="RNN 按时间展开：同一个单元在每个时间步重复使用，隐藏状态从左向右传递">
+  <g class="d-t" text-anchor="middle">
+    <g><rect class="d-acc" x="60" y="52" width="90" height="42" rx="10"/><text x="105" y="78">RNN 单元</text><text x="105" y="134">x₁</text><text x="105" y="26">h₁</text></g>
+    <g><rect class="d-acc" x="230" y="52" width="90" height="42" rx="10"/><text x="275" y="78">RNN 单元</text><text x="275" y="134">x₂</text><text x="275" y="26">h₂</text></g>
+    <g><rect class="d-acc" x="400" y="52" width="90" height="42" rx="10"/><text x="445" y="78">RNN 单元</text><text x="445" y="134">x₃</text><text x="445" y="26">h₃</text></g>
+    <g><rect class="d-acc" x="570" y="52" width="90" height="42" rx="10"/><text x="615" y="78">RNN 单元</text><text x="615" y="134">x_T</text><text x="615" y="26">h_T → 预测</text></g>
+    <text class="d-m" x="190" y="66">h₁</text><text class="d-m" x="360" y="66">h₂</text><text class="d-m" x="530" y="66">…</text>
+  </g>
+  <g class="d-ln"><path d="M20 73H58M150 73H228M320 73H398M490 73H568M660 73H700"/><path d="M105 120V96M275 120V96M445 120V96M615 120V96"/><path d="M105 50V34M275 50V34M445 50V34M615 50V34"/></g>
+  <text class="d-m" x="360" y="146" text-anchor="middle">四个方框是同一个单元（同一组权重），只是在时间上"展开"画了四次</text>
+</svg>
+<div class="demo" id="unroll-demo">
+  <div class="demo-title">🧪 实验：只有一个神经元的 RNN，怎么"记住"过去</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="260"></div>
+    <div class="readout"></div>
+    <p class="hint">输入是两周的销量（已标准化）。隐藏状态 h 的更新规则是 h<sub>t</sub> = tanh(0.6·x<sub>t</sub> + w·h<sub>t−1</sub>)。把"记忆权重 w"调到 0：h 只反映当天的输入，没有记忆；调到 0.9：h 变成过去很多天的平滑混合——这很像指数平滑！区别是：指数平滑的 α 由人定公式，RNN 的权重是从数据里学出来的，而且有很多个这样的神经元，各自学会记不同的东西。</p>
+  </div>
+</div>
+</section>
+
+<section id="vanish">
+<h2>RNN 的致命伤：梯度消失</h2>
+<p>训练 RNN 用的是"沿时间反向传播"（BPTT）：把展开后的网络当成一个很深的网络做反向传播。误差信号从最后一步往回传，每经过一个时间步，就要乘一次 $W_h$ 和 tanh 的导数：</p>
+$$\frac{\partial h_T}{\partial h_t} = \prod_{k=t+1}^{T} W_h^{\top}\,\mathrm{diag}\big(1-h_k^2\big)$$
+<p>这是 $T-t$ 个矩阵的连乘。tanh 的导数不超过 1，权重通常也不大，于是连乘的结果<strong>随距离指数级缩小</strong>：30 步之前的输入对损失的梯度可能只剩 $10^{-10}$，等于"学不到"。反过来权重偏大时会指数级放大——梯度爆炸（这个容易处理，裁剪梯度即可）。</p>
+<div class="demo" id="vanish-demo">
+  <div class="demo-title">🧪 实验：误差信号往回传，能传多远</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">纵轴是对数刻度：每下降一格，梯度缩小到十分之一。① RNN 的权重尺度在 0.5 附近（常见的初始化）时，梯度几乎是一条直线向下——指数衰减；② 把权重尺度调大，衰减会变慢，但很难恰好调到"不衰减"——权重一大，tanh 就进入饱和区，导数变小，又把梯度压了回去（没有 tanh 压着的情况下则会指数爆炸）；③ 看 LSTM：把"遗忘门偏置"调大（遗忘门越接近 1），它的线越来越平——<strong>LSTM 可以把梯度几乎无损地传回很多步之前</strong>。为什么能做到，下一节揭晓。</p>
+  </div>
+</div>
+</section>
+
+<section id="lstm">
+<h2>LSTM：给记忆修一条"传送带"</h2>
+<p>LSTM（Long Short-Term Memory，长短期记忆）的核心想法：<strong>除了隐藏状态 $h_t$，再加一条专门存放长期记忆的通道——细胞状态 $c_t$</strong>。细胞状态像一条传送带，信息在上面只做简单的"乘一个系数、加一点新东西"，不经过层层压缩，所以可以原样保留很久。往传送带上放什么、拿掉什么、读出什么，由三个<strong>门</strong>控制。</p>
+<svg class="diagram" viewBox="0 0 720 300" role="img" aria-label="LSTM 单元结构图：细胞状态在上方横向流过，依次经过遗忘门的乘法和输入门的加法；输出门控制隐藏状态">
+  <rect x="110" y="34" width="530" height="238" rx="16" class="d-box" style="fill:none;stroke-dasharray:4 4"/>
+  <path class="d-ln" style="stroke:var(--s1);stroke-width:3" d="M30 70H208M232 70H368M392 70H690"/>
+  <text class="d-t" x="30" y="58">c<tspan dy="4" font-size="10">t−1</tspan></text><text class="d-t" x="660" y="58">c<tspan dy="4" font-size="10">t</tspan></text>
+  <text class="d-m" x="300" y="56" text-anchor="middle">细胞状态（长期记忆的传送带）</text>
+  <g class="d-t" text-anchor="middle">
+    <circle cx="220" cy="70" r="12" class="d-acc"/><text x="220" y="75">×</text>
+    <circle cx="380" cy="70" r="12" class="d-acc"/><text x="380" y="75">+</text>
+    <circle cx="380" cy="128" r="12" class="d-acc"/><text x="380" y="133">×</text>
+    <ellipse cx="600" cy="108" rx="26" ry="12" class="d-box"/><text x="600" y="113" font-size="12">tanh</text>
+    <circle cx="600" cy="150" r="12" class="d-acc"/><text x="600" y="155">×</text>
+    <rect x="176" y="190" width="88" height="40" rx="8" style="fill:color-mix(in srgb,var(--s8) 16%,var(--surface));stroke:var(--s8)"/><text x="220" y="207">遗忘门 f</text><text class="d-m" x="220" y="223">σ：留多少旧记忆</text>
+    <rect x="286" y="190" width="88" height="40" rx="8" style="fill:color-mix(in srgb,var(--s3) 16%,var(--surface));stroke:var(--s3)"/><text x="330" y="207">输入门 i</text><text class="d-m" x="330" y="223">σ：写入多少</text>
+    <rect x="386" y="190" width="88" height="40" rx="8" class="d-box"/><text x="430" y="207">候选记忆 g</text><text class="d-m" x="430" y="223">tanh：写什么</text>
+    <rect x="496" y="190" width="88" height="40" rx="8" style="fill:color-mix(in srgb,var(--s4) 18%,var(--surface));stroke:var(--s4)"/><text x="540" y="207">输出门 o</text><text class="d-m" x="540" y="223">σ：读出多少</text>
+  </g>
+  <g class="d-ln">
+    <path d="M220 190V84"/><path d="M330 190V128H366"/><path d="M430 190V128H394"/><path d="M380 114V84"/>
+    <path d="M600 72V94"/><path d="M600 122V136"/><path d="M540 190V150H586"/>
+    <path d="M600 164V256H690"/>
+    <path d="M30 256H150V246H540"/><path d="M220 246V232M330 246V232M430 246V232M540 246V232"/><path d="M150 292V258"/>
+  </g>
+  <text class="d-t" x="30" y="248">h<tspan dy="4" font-size="10">t−1</tspan></text><text class="d-t" x="660" y="248">h<tspan dy="4" font-size="10">t</tspan></text>
+  <text class="d-t" x="158" y="292">x<tspan dy="4" font-size="10">t</tspan></text><text class="d-m" x="250" y="290">当前输入和上一步的隐藏状态一起送进四个小网络</text>
+</svg>
+<p>每个时间步的计算（$z = [x_t, h_{t-1}]$ 表示把当前输入和上一步隐藏状态拼在一起）：</p>
+$$\begin{aligned}
+f_t &= \sigma(W_f z + b_f) &&\text{遗忘门：旧记忆每一项保留多少（0 = 全忘，1 = 全留）}\\
+i_t &= \sigma(W_i z + b_i) &&\text{输入门：新信息每一项写入多少}\\
+g_t &= \tanh(W_g z + b_g) &&\text{候选记忆：这一步想写入的新内容}\\
+c_t &= f_t \odot c_{t-1} + i_t \odot g_t &&\textbf{更新细胞状态：忘掉一部分旧的，加上一部分新的}\\
+o_t &= \sigma(W_o z + b_o) &&\text{输出门：记忆里的哪些部分现在要用}\\
+h_t &= o_t \odot \tanh(c_t) &&\text{隐藏状态：对外输出}
+\end{aligned}$$
+<p>$\odot$ 是逐元素相乘。门都用 sigmoid，因为它的输出在 0–1 之间，正好表示"开多大"。</p>
+<div class="callout key"><div class="hd">为什么这样就不怕梯度消失了</div>
+<p>看第 4 行：$c_t = f_t \odot c_{t-1} + \cdots$。从 $c_t$ 到 $c_{t-1}$ 的梯度就是 $f_t$——<strong>只乘一个遗忘门，没有权重矩阵，也没有 tanh 的压缩</strong>。只要网络学会把遗忘门开到接近 1，梯度就能沿着细胞状态这条传送带几乎无损地传回很多步。而且遗忘门是<em>学出来的、随输入变化的</em>：网络可以自己决定什么时候该记住（$f\approx1$），什么时候该清空（$f\approx0$）。</p></div>
+
+<div class="demo" id="cell-demo">
+  <div class="demo-title">🧪 实验：亲手拧三个门</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">这里把三个门固定在某个开度上，观察一个记忆单元 40 步内的表现。输入在第 5 步和第 22 步各有一次脉冲（候选记忆 g）。试试预设：<strong>长期记住</strong>（f = 1）——第一次脉冲被一直保存；<strong>快速遗忘</strong>（f = 0.6）——记忆几步内衰减，像短期的指数平滑；<strong>屏蔽输入</strong>（i = 0）——新信息写不进去；<strong>记着但不说</strong>（o = 0）——细胞状态里存着，但隐藏状态输出为 0。真实的 LSTM 里，这三个开度每一步都由网络根据当前输入重新计算。</p>
+  </div>
+</div>
+</section>
+
+<section id="play">
+<h2>现场训练一个 LSTM</h2>
+<p>下面在浏览器里训练一个真正的 LSTM 来预测电商销量：读入过去若干天，<strong>一次输出未来 7 天</strong>（多输出策略）。数据做了对数变换和标准化；训练集、验证集、测试集按时间先后切分。</p>
+<div class="demo" id="play-demo">
+  <div class="demo-title">🧪 LSTM 训练场</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">损失曲线（标准化尺度上的 MSE）</div><div class="chart" data-h="230"></div></div>
+      <div><div class="chart-cap">最后一个测试窗口里各隐藏单元的状态</div><div class="chart" data-h="230"></div></div>
+    </div>
+    <div class="chart-cap">测试段：每周一预测未来 7 天，共 8 周</div>
+    <div class="chart" data-h="260"></div>
+    <div class="readout"></div>
+    <p class="hint">点"训练"。最初的预测是一条接近均值的线；十几轮后周内的起伏开始出现；继续训练，验证损失不再下降甚至回升时就该停了——页面会自动记住验证损失最低那一轮的权重，并用它来做测试段的预测（这就是早停）。可以对比：① 把单元类型切到 RNN；② 把窗口从 14 改到 7 或 28——窗口至少要覆盖一个完整的季节周期，模型才有机会看到"上周的今天"；③ 把隐藏单元加到 24——参数多了几倍，但只有一条序列、几百个样本，效果未必更好。右上的热力图显示每个记忆单元在窗口内的取值：有的单元随星期波动，有的变化很慢（在记"水平"）。</p>
+  </div>
+</div>
+<div class="callout warn"><div class="hd">⚠️ 诚实地说：单条序列上，LSTM 往往打不过简单方法</div>
+<p>上面的实验只有一条序列、几百个训练样本。在这种数据量下，LSTM 的表现通常和季节朴素法、指数平滑差不多，甚至更差——这是大量预测竞赛反复验证过的结论，不是这个演示的问题。<strong>深度学习的优势在于"很多条相关序列一起训练"</strong>（成千上万个 SKU、门店、设备）加上丰富的协变量。那时它能学到单条序列学不到的共性规律。</p></div>
+</section>
+
+<section id="memory">
+<h2>长依赖任务：RNN 与 LSTM 的正面对比</h2>
+<p>设计一个专门考"记忆力"的任务：序列的第 1 步给出一个数值（并带一个"请记住"的标记），之后的若干步全是无关的噪声，最后一步要求把最初的那个数值原样输出。要做对，模型必须把第 1 步的信息一直保存到最后。</p>
+<div class="demo" id="mem-demo">
+  <div class="demo-title">🧪 实验：记住 N 步之前的一个数</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">纵轴是 R²：1 表示完美复述，0 表示和瞎猜（输出均值）一样。间隔设为 5–8 步时，两种网络都能学会；拉到 20 步以上，RNN 的曲线通常趴在 0 附近起不来——梯度传不回第 1 步，它根本不知道该记住什么；LSTM 则在若干轮之后"开窍"，学会了只在有标记的那一步打开输入门、之后保持遗忘门接近 1，把那个数一直存在细胞状态里。（两个网络都只有 8 个隐藏单元；RNN 用常见的小权重初始化，LSTM 的遗忘门偏置初始化为 2，即默认倾向于"记住"——这是实践中的常用技巧。网络很小、训练轮数有限，偶尔会有例外；点"重新训练"会换一组随机初始权重。）</p>
+  </div>
+</div>
+</section>
+
+<section id="gru">
+<h2>GRU 与参数量</h2>
+<p><strong>GRU</strong>（Gated Recurrent Unit）是 LSTM 的简化版：把遗忘门和输入门合并成一个"更新门"，去掉了单独的细胞状态，只有两个门。参数比 LSTM 少四分之一，训练更快，效果通常相近。两者谁更好没有定论，实践中都试一下即可；讲原理时以 LSTM 为准，因为它的"传送带"更直观。</p>
+<div class="demo" id="param-demo">
+  <div class="demo-title">🧪 参数量计算器</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="readout"></div>
+    <p class="hint">循环层的参数量 ≈ 门的个数 × 隐藏单元数 × （输入维度 + 隐藏单元数 + 1）。注意它和<strong>序列长度无关</strong>（参数共享），而和隐藏单元数的<strong>平方</strong>成正比——把隐藏单元翻倍，参数量大约变成 4 倍。训练样本只有几百上千个时，几十个隐藏单元就足够了。</p>
+  </div>
+</div>
+</section>
+
+<section id="practice">
+<h2>实务要点</h2>
+<div class="tw"><table>
+<thead><tr><th>问题</th><th>做法</th></tr></thead>
+<tbody>
+<tr><td><strong>输入怎么组织</strong></td><td>每个时间步一个向量：[目标值, 促销, 星期编码, 价格, …]。目标值标准化（或取对数再标准化）；类别型特征用嵌入（embedding）</td></tr>
+<tr><td><strong>窗口多长</strong></td><td>至少 1–2 个主要季节周期（日数据 14–56 天）。太长训练慢、收益小</td></tr>
+<tr><td><strong>多步预测</strong></td><td>① 最后一步接全连接层直接输出 h 个值（上面实验的做法，最简单）；② 编码器-解码器（seq2seq）：一个 LSTM 读历史，另一个 LSTM 逐步生成未来，适合有"未来已知协变量"的情况</td></tr>
+<tr><td><strong>未来已知的协变量</strong></td><td>促销计划、节假日这类未来值，可以拼接到输出层之前，或作为解码器每一步的输入</td></tr>
+<tr><td><strong>网络规模</strong></td><td>1–2 层，每层 32–128 个单元通常足够。先小后大</td></tr>
+<tr><td><strong>防过拟合</strong></td><td>早停（最重要）、Dropout（0.1–0.3）、权重衰减；按时间切分验证集</td></tr>
+<tr><td><strong>训练稳定性</strong></td><td>Adam，学习率 1e-3 起；<strong>梯度裁剪</strong>（范数上限 1–5）防爆炸</td></tr>
+<tr><td><strong>多序列（全局）训练</strong></td><td>所有序列的窗口混在一起训练一个模型；每条序列各自标准化；加序列 ID 或属性的嵌入。这是 LSTM 真正发挥作用的用法</td></tr>
+<tr><td><strong>概率预测</strong></td><td>让网络输出分布参数（如均值和方差）或多个分位数，而不是一个点。<strong>DeepAR</strong> 就是"LSTM + 输出概率分布 + 多序列训练"</td></tr>
+<tr><td><strong>不要用双向 LSTM</strong></td><td>双向结构会读到"未来"的输入，做预测时属于泄漏（做历史数据的异常检测、填补则可以）</td></tr>
+</tbody></table></div>
+<details class="code" open><summary>Python 参考代码：PyTorch LSTM 多步预测（含协变量、早停、梯度裁剪）</summary>
+<pre><code>import numpy as np, torch, torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+
+WIN, H = 28, 7                                    # 看 28 天，预测 7 天
+
+class LSTMForecaster(nn.Module):
+    def __init__(self, n_feat, n_future_feat, hidden=64, layers=1, dropout=0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(n_feat, hidden, num_layers=layers, batch_first=True,
+                            dropout=dropout if layers &gt; 1 else 0.0)
+        self.head = nn.Sequential(nn.Linear(hidden + H * n_future_feat, 64), nn.ReLU(),
+                                  nn.Dropout(dropout), nn.Linear(64, H))
+    def forward(self, x_hist, x_future):
+        # x_hist: [B, WIN, n_feat]      历史窗口（目标值 + 协变量）
+        # x_future: [B, H, n_future_feat] 未来已知的协变量（促销计划、星期等）
+        _, (h_n, _) = self.lstm(x_hist)           # h_n[-1]: [B, hidden] 最后一步的隐藏状态
+        z = torch.cat([h_n[-1], x_future.flatten(1)], dim=1)
+        return self.head(z)                       # [B, H]
+
+def make_windows(z, feats, fut):                  # z: 标准化后的目标；feats/fut: 协变量矩阵
+    Xh, Xf, Y = [], [], []
+    for t in range(WIN, len(z) - H + 1):
+        Xh.append(np.column_stack([z[t - WIN:t], feats[t - WIN:t]]))
+        Xf.append(fut[t:t + H]); Y.append(z[t:t + H])
+    f32 = lambda a: torch.tensor(np.array(a), dtype=torch.float32)
+    return f32(Xh), f32(Xf), f32(Y)
+
+ly = np.log1p(y)
+n_tr = len(ly) - 112                              # 最后 16 周：8 周验证 + 8 周测试
+mu, sd = ly[:n_tr].mean(), ly[:n_tr].std()        # 只用训练段统计量
+Xh, Xf, Y = make_windows((ly - mu) / sd, feats, fut)
+i_va, i_te = n_tr - WIN, n_tr - WIN + 56
+train = DataLoader(TensorDataset(Xh[:i_va], Xf[:i_va], Y[:i_va]), batch_size=64, shuffle=True)
+
+model = LSTMForecaster(Xh.shape[2], Xf.shape[2])
+opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+best, bad = 1e9, 0
+for epoch in range(300):
+    model.train()
+    for xh, xf, yb in train:
+        opt.zero_grad()
+        loss = nn.functional.mse_loss(model(xh, xf), yb)
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)      # 梯度裁剪
+        opt.step()
+    model.eval()
+    with torch.no_grad():
+        val = nn.functional.mse_loss(model(Xh[i_va:i_te], Xf[i_va:i_te]), Y[i_va:i_te]).item()
+    if val &lt; best: best, bad, state = val, 0, {k: v.clone() for k, v in model.state_dict().items()}
+    else:
+        bad += 1
+        if bad &gt;= 20: break                                    # 早停
+model.load_state_dict(state)
+pred = np.expm1(model(Xh[i_te:], Xf[i_te:]).detach().numpy() * sd + mu)
+
+# 多序列 + 概率预测，直接用现成的库更省事：
+# neuralforecast: NeuralForecast(models=[LSTM(h=7, input_size=28), DeepAR(h=7, input_size=28)], freq="D")
+# darts / gluonts 也提供 DeepAR、TFT 等模型</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>RNN 按时间顺序读序列，用隐藏状态传递记忆；每一步共用同一组参数。</li>
+  <li>普通 RNN 的梯度沿时间连乘、指数衰减，学不到长距离依赖。</li>
+  <li>LSTM 增加了细胞状态（传送带）和三个门：遗忘门决定留多少旧记忆，输入门决定写多少新信息，输出门决定读出多少。</li>
+  <li>细胞状态的梯度只乘遗忘门，遗忘门接近 1 时梯度几乎不衰减。</li>
+  <li>GRU 是更轻的变体；参数量与序列长度无关，与隐藏单元数的平方成正比。</li>
+  <li>实务：标准化、窗口覆盖季节周期、早停、梯度裁剪；LSTM 的价值主要体现在多序列全局训练上。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/nnlib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+const RT = TS.data.retail(), LY = RT.y.map(Math.log);
+
+/* ---------- 单神经元 RNN ---------- */
+Site.demo('unroll-demo', {
+  controls: [
+    { k: 'w', label: '记忆权重 w（h 对上一步的依赖）', min: 0, max: 0.98, step: 0.02, value: 0.6, fmt: v => v.toFixed(2) },
+    { k: 't', label: '读到第几天', min: 1, max: 21, step: 1, value: 21 },
+  ],
+  render(s, d) {
+    const a = 976, n = 21, sc = NN.scaler(LY.slice(a - 60, a)), x = LY.slice(a, a + n).map(v => +sc.f(v).toFixed(2)), h = []; let hp = 0;
+    for (let t = 0; t < n; t++) { hp = Math.tanh(0.6 * x[t] + s.w * hp); h.push(+hp.toFixed(3)); }
+    const bar = S.bar('输入 x（标准化后的销量）', x, { c: 0, op: 0.55, maxW: 16 });
+    bar.markLine = S.vline(RT.dates[a + s.t - 1].slice(5), { label: '读到这里' });
+    d.chart(0, { xAxis: { data: RT.dates.slice(a, a + n).map(v => v.slice(5)) }, yAxis: {}, series: [bar, S.line('隐藏状态 h', h.map((v, i) => (i < s.t ? v : null)), { c: 1, w: 2.5, sym: true, symSize: 5 })] });
+    const t = s.t - 1, prev = t ? h[t - 1] : 0;
+    d.out(`<div class="callout tip" style="margin:0">第 ${s.t} 步：h = tanh(0.6 × <b>${x[t]}</b> + ${s.w.toFixed(2)} × <b>${prev.toFixed(3)}</b>) = tanh(${(0.6 * x[t] + s.w * prev).toFixed(3)}) = <b>${h[t]}</b>　<span class="muted">一次输入的影响每过一步大约乘以 ${s.w.toFixed(2)}，${s.w > 0 ? '约 ' + (Math.log(0.5) / Math.log(s.w)).toFixed(1) + ' 步后减半' : '下一步就消失'}。</span></div>`);
+  },
+});
+
+/* ---------- 梯度消失 ---------- */
+Site.demo('vanish-demo', {
+  controls: [
+    { k: 'gain', label: 'RNN 的权重尺度', min: 0.3, max: 2, step: 0.05, value: 0.6, fmt: v => v.toFixed(2) },
+    { k: 'fb', label: 'LSTM 的遗忘门偏置', min: 0, max: 5, step: 0.25, value: 1, fmt: v => v.toFixed(2) + '（f ≈ ' + (1 / (1 + Math.exp(-v))).toFixed(2) + '）' },
+    { k: 'T', label: '序列长度', min: 10, max: 60, step: 5, value: 40 },
+  ],
+  render(s, d) {
+    const H = 12, T = s.T, r = TS.rng(3), seqs = Array.from({ length: 6 }, () => Array.from({ length: T }, () => [0.5 * r.n()]));
+    const prof = o => { const m = NN.rnn(Object.assign({ nin: 1, nh: H, seed: 5 }, o)), acc = new Array(T).fill(0); seqs.forEach(q => { const f = m.forward(q); m.zeroGrad(); m.backward(f.cache, [1]); f.cache.gradNorm.forEach((v, t) => { acc[T - 1 - t] += v / seqs.length; }); }); return acc.map(v => Math.min(1e12, Math.max(1e-14, v))); };
+    const gR = prof({ cell: 'rnn', gain: s.gain }), gL = prof({ cell: 'lstm', fbias: s.fb, gain: 0.6 });
+    d.chart(0, { xAxis: { data: gR.map((_, k) => k), name: '往回传了多少步', nameLocation: 'middle', nameGap: 22 }, yAxis: { type: 'log', name: '梯度大小', min: 1e-14, max: 1e12, axisLabel: { formatter: v => '1e' + Math.round(Math.log10(v)) } },
+      tooltip: { valueFormatter: v => (+v).toExponential(1) },
+      series: [S.line('RNN', gR, { c: 7, w: 2.5 }), S.line('LSTM', gL, { c: 0, w: 2.5 })] });
+    const rate = g => Math.pow(g[T - 1] / g[0], 1 / (T - 1)), fmt = v => v.toExponential(1), rr = rate(gR), rl = rate(gL);
+    d.out(Site.tiles([
+      ['RNN：传回 ' + (T - 1) + ' 步后剩下', fmt(gR[T - 1] / gR[0]), '平均每步 × ' + rr.toFixed(2), rr > 1.15 ? 'bad' : rr < 0.8 ? 'bad' : 'good'],
+      ['RNN 的状态', rr > 1.15 ? '梯度爆炸' : rr < 0.8 ? '梯度消失' : '大致稳定'],
+      ['LSTM：传回 ' + (T - 1) + ' 步后剩下', fmt(gL[T - 1] / gL[0]), '平均每步 × ' + rl.toFixed(2), rl > 0.9 ? 'good' : ''],
+    ]));
+  },
+});
+
+/* ---------- 手动拧门 ---------- */
+const PRESETS = { keep: [1, 1, 1], forget: [0.6, 1, 1], block: [1, 0, 1], mute: [1, 1, 0], custom: null };
+Site.demo('cell-demo', {
+  controls: [
+    { k: 'preset', label: '预设', type: 'seg', options: [['keep', '长期记住'], ['forget', '快速遗忘'], ['block', '屏蔽输入'], ['mute', '记着但不说']] },
+    { k: 'f', label: '遗忘门 f（保留多少旧记忆）', min: 0, max: 1, step: 0.02, value: 1, fmt: v => v.toFixed(2) },
+    { k: 'i', label: '输入门 i（写入多少新信息）', min: 0, max: 1, step: 0.02, value: 1, fmt: v => v.toFixed(2) },
+    { k: 'o', label: '输出门 o（读出多少）', min: 0, max: 1, step: 0.02, value: 1, fmt: v => v.toFixed(2) },
+  ],
+  render(s, d, changed) {
+    if (changed === 'preset' && PRESETS[s.preset]) ['f', 'i', 'o'].forEach((k, j) => d.set(k, PRESETS[s.preset][j]));
+    const T = 40, g = new Array(T).fill(0); g[4] = 0.9; g[21] = -0.6;
+    const c = [], h = []; let cp = 0;
+    for (let t = 0; t < T; t++) { cp = s.f * cp + s.i * g[t]; c.push(+cp.toFixed(3)); h.push(+(s.o * Math.tanh(cp)).toFixed(3)); }
+    d.chart(0, { xAxis: { data: g.map((_, t) => t + 1), name: '时间步', nameLocation: 'middle', nameGap: 22 }, yAxis: { min: -1, max: 1, scale: false },
+      series: [S.bar('新信息（候选记忆 g）', g, { c: 2, maxW: 14 }), S.line('细胞状态 c', c, { c: 0, w: 2.5 }), S.line('隐藏状态 h = o · tanh(c)', h, { c: 1, w: 2, dash: true })] });
+    const half = s.f > 0 && s.f < 1 ? (Math.log(0.5) / Math.log(s.f)).toFixed(1) + ' 步' : s.f >= 1 ? '永不衰减' : '立即清空';
+    d.out(Site.tiles([['记忆的半衰期', half, '由遗忘门决定'], ['第 20 步时还记得第 5 步的多少', Site.pct(Math.pow(s.f, 15) * s.i, 0), 'f¹⁵ × i'], ['第 40 步的细胞状态 / 输出', c[T - 1].toFixed(2) + ' / ' + h[T - 1].toFixed(2)]]));
+  },
+});
+
+/* ---------- LSTM 训练场 ---------- */
+const A0 = 300, VA = 920, TE = 976, HOR = 7;
+Site.demo('play-demo', {
+  controls: [
+    { k: 'cell', label: '单元类型', type: 'seg', options: [['lstm', 'LSTM'], ['rnn', 'RNN']] },
+    { k: 'nh', label: '隐藏单元数', min: 4, max: 24, step: 2, value: 8 },
+    { k: 'win', label: '输入窗口', type: 'seg', options: [[7, '7 天'], [14, '14 天'], [28, '28 天']], value: 14 },
+    { k: 'lr', label: '学习率', type: 'seg', options: [[0.002, '0.002'], [0.01, '0.01'], [0.05, '0.05']], value: 0.01 },
+    { act: 'train', label: '▶ 训练 / 暂停', primary: true, run(s, d) {
+      d.loop('train', () => { const t0 = performance.now(); s.trL.push(NN.trainEpoch(s.model, s.opt, s.tr.X, s.tr.Y, { batch: 32, rng: s.rng, clip: 2 })); s.vaL.push(NN.mse(s.model, s.va.X, s.va.Y)); if (s.vaL[s.vaL.length - 1] <= Math.min(...s.vaL)) s.bestW = Float64Array.from(s.model.w); s.ms = performance.now() - t0; d.draw(); return s.trL.length < 80; }, 10);
+      return false; } },
+    { act: 'reset', label: '重置', run: s => { s.key = null; } },
+  ],
+  render(s, d) {
+    const key = [s.cell, s.nh, s.win, s.lr].join('_'), p = Site.pal(), win = s.win;
+    if (s.key !== key) {
+      d.stop('train'); s.key = key;
+      s.sc = NN.scaler(LY.slice(A0, VA)); s.z = LY.map(s.sc.f);
+      const mk = (a, b) => { const X = [], Y = []; for (let t = a; t + HOR <= b; t++) { X.push(s.z.slice(t - win, t).map(v => [v])); Y.push(s.z.slice(t, t + HOR)); } return { X, Y }; };
+      s.tr = mk(A0 + win, VA); s.va = mk(VA, TE);
+      s.model = NN.rnn({ nin: 1, nh: s.nh, nout: HOR, cell: s.cell, seed: 3 }); s.opt = NN.adam(s.model, s.lr); s.rng = TS.rng(1); s.trL = []; s.vaL = []; s.ms = 0; s.bestW = null;
+    }
+    const ep = s.trL.length;
+    d.chart(0, { xAxis: { data: s.trL.map((_, i) => i + 1), name: '轮数', nameLocation: 'middle', nameGap: 22 }, yAxis: { type: 'log' }, series: [S.line('训练', s.trL.map(v => +v.toFixed(4)), { c: 0 }), S.line('验证', s.vaL.map(v => +v.toFixed(4)), { c: 3 })] });
+    // 测试：8 个周一各预测 7 天
+    const pred = [], actual = RT.y.slice(TE, TE + 56), curW = Float64Array.from(s.model.w); let last;
+    if (s.bestW) s.model.w.set(s.bestW);          // 早停：用验证损失最低那一轮的权重来预测
+    for (let k = 0; k < 8; k++) { const t = TE + 7 * k, f = s.model.forward(s.z.slice(t - win, t).map(v => [v])); last = f.cache; Array.from(f.y).forEach(v => pred.push(Math.exp(s.sc.inv(v)))); }
+    s.model.w.set(curW);
+    const sn = actual.map((_, j) => RT.y[TE + Math.floor(j / 7) * 7 - 7 + (j % 7)]);
+    // 隐藏单元状态热力图：LSTM 画细胞状态 c，RNN 画隐藏状态 h
+    const st = s.cell === 'lstm' ? last.cs.slice(1) : last.hs.slice(1), cells = []; let mx = 0.5;
+    st.forEach((v, t) => v.forEach((q, j) => { cells.push([t, j, +q.toFixed(3)]); mx = Math.max(mx, Math.abs(q)); }));
+    d.chart(1, { xAxis: { type: 'category', data: st.map((_, t) => '第' + (t + 1) + '天'), splitLine: { show: false } }, yAxis: { type: 'category', data: Array.from({ length: s.nh }, (_, j) => '单元' + (j + 1)), splitLine: { show: false }, axisLabel: { fontSize: 10 } }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `单元 ${q.value[1] + 1}，第 ${q.value[0] + 1} 天：<b>${q.value[2]}</b>` },
+      visualMap: { show: false, min: -mx, max: mx, dimension: 2, inRange: { color: p.div } }, grid: { left: 6, right: 8, top: 8, bottom: 6 },
+      series: [{ type: 'heatmap', name: s.cell === 'lstm' ? '细胞状态' : '隐藏状态', data: cells }] });
+    const act = S.line('实际', actual, { c: 0 }); act.markLine = S.vline(Array.from({ length: 7 }, (_, k) => RT.dates[TE + 7 * (k + 1)]), { c: p.grid });
+    d.chart(2, { xAxis: { data: RT.dates.slice(TE, TE + 56) }, yAxis: { name: '件' }, series: [act, S.line(s.cell.toUpperCase() + ' 预测', pred.map(Math.round), { c: 1, w: 2.5 }), S.line('季节朴素', sn, { c: p.muted, dash: true, w: 1.2 })] });
+    const m = TS.metrics(actual, pred), m0 = TS.metrics(actual, sn), best = ep ? s.vaL.indexOf(Math.min(...s.vaL)) + 1 : 0;
+    d.out(Site.tiles([
+      ['已训练', ep + ' 轮', ep ? '每轮约 ' + Math.round(s.ms) + ' ms' : '点"训练"开始'],
+      ['测试 MAE', m.mae, 'WAPE ' + Site.pct(m.wape), ep && m.mae < m0.mae ? 'good' : ''],
+      ['季节朴素 MAE', m0.mae, '基线'],
+      ['验证损失最低', ep ? '第 ' + best + ' 轮' : '—', ep ? '预测用的就是这一轮的权重（早停）' : ''],
+      ['参数个数', s.model.n, s.tr.X.length + ' 个训练样本'],
+    ]));
+  },
+});
+
+/* ---------- 长依赖任务 ---------- */
+Site.demo('mem-demo', {
+  controls: [
+    { k: 'T', label: '要记住多少步之前的数', min: 5, max: 24, step: 1, value: 24 },
+    { act: 'train', label: '▶ 训练对比 / 暂停', primary: true, run(s, d) {
+      d.loop('train', () => { ['rnn', 'lstm'].forEach(c => { NN.trainEpoch(s.m[c], s.o[c], s.tr.X, s.tr.Y, { batch: 16, rng: s.rng }); s.r2[c].push(+(1 - NN.mse(s.m[c], s.te.X, s.te.Y) / s.v).toFixed(3)); }); d.draw(); return s.r2.rnn.length < 40; }, 10);
+      return false; } },
+    { act: 'reset', label: '重新训练（换初始权重）', run: s => { s.seed = (s.seed || 11) + 1; s.key = null; } },
+  ],
+  render(s, d) {
+    const key = s.T + '_' + (s.seed || 11);
+    if (s.key !== key) {
+      d.stop('train'); s.key = key;
+      const rg = TS.rng(9 + s.T), mk = n => { const X = [], Y = []; for (let i = 0; i < n; i++) { const v = 2 * rg() - 1, q = [[v, 1]]; for (let t = 1; t < s.T; t++) q.push([0.5 * rg.n(), 0]); X.push(q); Y.push([v]); } return { X, Y }; };
+      s.tr = mk(300); s.te = mk(150); s.v = TS.variance(s.te.Y.map(y => y[0])); s.rng = TS.rng(4);
+      s.m = { rnn: NN.rnn({ nin: 2, nh: 8, cell: 'rnn', gain: 0.58, seed: s.seed || 11 }), lstm: NN.rnn({ nin: 2, nh: 8, cell: 'lstm', fbias: 2, seed: s.seed || 11 }) };
+      s.o = { rnn: NN.adam(s.m.rnn, 0.02), lstm: NN.adam(s.m.lstm, 0.02) }; s.r2 = { rnn: [], lstm: [] };
+    }
+    const ep = s.r2.rnn.length, cl = a => a.map(v => Math.max(-0.2, v));
+    d.chart(0, { xAxis: { data: Array.from({ length: 40 }, (_, i) => i + 1), name: '训练轮数', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: 'R²', min: -0.2, max: 1, scale: false },
+      series: [S.line('RNN', cl(s.r2.rnn), { c: 7, w: 2.5 }), S.line('LSTM', cl(s.r2.lstm), { c: 0, w: 2.5 })] });
+    const last = a => (a.length ? a[a.length - 1] : null), tile = (nm, v) => [nm + ' 的 R²', v == null ? '—' : v.toFixed(2), v == null ? '' : v > 0.9 ? '学会了' : v > 0.4 ? '学到一部分' : '没学会', v == null ? '' : v > 0.9 ? 'good' : v < 0.4 ? 'bad' : ''];
+    d.out(Site.tiles([['间隔', s.T + ' 步', '已训练 ' + ep + ' / 40 轮'], tile('RNN', last(s.r2.rnn)), tile('LSTM', last(s.r2.lstm))]));
+  },
+});
+
+/* ---------- 参数量 ---------- */
+Site.demo('param-demo', {
+  controls: [
+    { k: 'D', label: '每步输入的特征数', min: 1, max: 32, step: 1, value: 4 },
+    { k: 'H', label: '隐藏单元数', min: 4, max: 256, step: 4, value: 64 },
+    { k: 'O', label: '输出步数', min: 1, max: 28, step: 1, value: 7 },
+  ],
+  render(s, d) {
+    const row = (nm, cell, gates) => { const rec = NN.paramCount(cell, s.D, s.H, s.O) - s.O * (s.H + 1); return [nm, gates, `${gates} × ${s.H} × (${s.D} + ${s.H} + 1)`, rec, s.O * (s.H + 1), rec + s.O * (s.H + 1)]; };
+    d.out(Site.table(['模型', '门/子网络数', '循环层参数公式', '循环层', '输出层', '合计'], [row('RNN', 'rnn', 1), row('GRU', 'gru', 3), row('LSTM', 'lstm', 4)], { num: [1, 3, 4, 5], hl: 2 }));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: 'RNN 处理长度为 100 的序列和长度为 10 的序列，参数量有什么不同？', opts: ['前者是后者的 10 倍', '完全相同，因为每个时间步共用同一组参数', '前者是后者的 100 倍', '取决于数据'], ans: 1, why: '参数共享：同一个单元在时间上重复使用。参数量只取决于输入维度和隐藏单元数。' },
+  { q: '普通 RNN 难以学习"50 步之前的输入对当前输出的影响"，根本原因是？', opts: ['隐藏状态维度太小', '反向传播时梯度要连乘 50 次权重和激活函数导数，指数级衰减到几乎为 0', '学习率太大', 'tanh 不能表示负数'], ans: 1, why: '梯度消失。误差信号传不回那么远，对应的权重得不到有效更新。' },
+  { q: 'LSTM 的遗忘门输出接近 1 时，意味着？', opts: ['把细胞状态清零', '旧的细胞状态几乎原样保留到下一步', '当前输入被完全写入', '隐藏状态输出为 0'], ans: 1, why: 'c_t = f·c_{t−1} + i·g。f≈1 时旧记忆完整保留；同时梯度沿这条路径也几乎不衰减。' },
+  { q: 'LSTM 的三个门为什么用 sigmoid 而不是 tanh 或 ReLU？', opts: ['sigmoid 计算最快', 'sigmoid 输出在 0–1 之间，正好表示"通过的比例"', 'sigmoid 没有梯度消失问题', '只是历史习惯，没有原因'], ans: 1, why: '门的作用是按比例放行信息：0 = 完全关闭，1 = 完全打开。sigmoid 的值域恰好合适。' },
+  { q: '只有一条两年的日销量序列，没有其他相关序列。下面哪种说法最合理？', opts: ['应该用 LSTM，因为深度学习最先进', 'LSTM 很可能不如指数平滑或 GBDT；应先建立这些基线，LSTM 更适合大量相关序列一起训练的场景', 'LSTM 不能用于单条序列', '应该把隐藏单元调到 512 来弥补数据不足'], ans: 1, why: '几百个样本不足以让 LSTM 学出比简单方法更好的规律。数据量和序列数量是选择深度学习的首要条件。' },
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>09 神经网络基础 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="09">
+<main>
+<p class="lead">LSTM 和 Transformer 看起来复杂，但它们和最简单的神经网络共用同一套零件：<strong>神经元、损失函数、梯度下降、反向传播</strong>。这一章把这四个零件逐个拆开讲清楚，并在浏览器里现场训练一个小网络。下一章的 LSTM 只是把这些零件按另一种方式接起来。</p>
+
+<section id="neuron">
+<h2>神经元：加权求和，再过一个"开关"</h2>
+<p>一个神经元做两件事：把输入加权求和，再通过一个非线性的<strong>激活函数</strong>：</p>
+$$h = \sigma(w_1x_1 + w_2x_2 + \cdots + w_nx_n + b)$$
+<p>权重 $w$ 表示每个输入有多重要、往哪个方向起作用；偏置 $b$ 决定"门槛"在哪；激活函数 $\sigma$ 提供<strong>非线性</strong>——没有它，无论叠多少层，整个网络都只是一个线性回归。</p>
+<div class="demo" id="neuron-demo">
+  <div class="demo-title">🧪 实验：一个神经元能表达什么</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="260"></div>
+    <div class="readout"></div>
+    <p class="hint">w 控制曲线的陡峭程度和朝向（负的 w 让曲线翻转），b 让曲线左右平移。切换激活函数并留意虚线（导数）：sigmoid 的导数最大只有 0.25，而且两端几乎为 0——信号一旦落在"饱和区"，梯度就传不回去。这是下一章"梯度消失"的根源；ReLU 在正半轴导数恒为 1，所以深层网络普遍用它。</p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>激活函数</th><th>输出范围</th><th>特点</th><th>常见用途</th></tr></thead>
+<tbody>
+<tr><td>sigmoid $\frac{1}{1+e^{-x}}$</td><td>(0, 1)</td><td>像一个平滑的开关；两端饱和</td><td><strong>LSTM 的"门"</strong>（0 = 关，1 = 开）；二分类输出</td></tr>
+<tr><td>tanh</td><td>(−1, 1)</td><td>以 0 为中心；两端饱和</td><td>RNN / LSTM 的状态更新</td></tr>
+<tr><td>ReLU $\max(0,x)$</td><td>[0, ∞)</td><td>计算快；正半轴不饱和</td><td>MLP、CNN、Transformer 的前馈层</td></tr>
+<tr><td>线性（无激活）</td><td>(−∞, ∞)</td><td>—</td><td>回归任务的<strong>输出层</strong>（预测值不该被压缩）</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="mlp">
+<h2>多层感知机（MLP）：很多个神经元叠起来</h2>
+<p>把一排神经元并列成一个<strong>隐藏层</strong>，再把它们的输出加权求和，就是最简单的神经网络——多层感知机：</p>
+$$\hat y = \sum_{j=1}^{H} v_j\,\sigma(w_j x + b_j) + c$$
+<p>每个隐藏神经元提供一个"基本形状"（一个 S 形台阶或一个折角），输出层把这些形状按不同权重叠加起来。神经元足够多时，这种叠加可以逼近任何连续函数——这就是"万能逼近定理"的直观含义。下面用上一章的"气温 → 负荷"数据现场训练，对比一下：树用阶梯去拟合，神经网络用平滑的曲线。</p>
+<div class="demo" id="mlp-demo">
+  <div class="demo-title">🧪 实验：在浏览器里训练一个 MLP</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">拟合结果（细线 = 各隐藏神经元的贡献）</div><div class="chart" data-h="260"></div></div>
+      <div><div class="chart-cap">损失曲线</div><div class="chart" data-h="260"></div></div>
+    </div>
+    <div class="readout"></div>
+    <p class="hint">点"训练"，看曲线怎么从一条随机的线逐步弯成数据的形状。① 隐藏单元设为 1：只能表达一个弯，拟合不了"两头翘"；② 设为 3–4：刚好够用；③ 设为 24 并多训练一会儿：训练误差继续下降，但测试误差可能停滞甚至回升。切到 ReLU，细线变成一个个"折角"——网络是用很多折线段拼出曲线的。</p>
+  </div>
+</div>
+</section>
+
+<section id="gd">
+<h2>梯度下降：沿着下坡的方向一小步一小步走</h2>
+<p>训练就是找一组参数让<strong>损失函数</strong>最小。回归任务最常用的损失是均方误差 $L = \frac1n\sum(\hat y_i - y_i)^2$。参数有成千上万个，没法直接解方程，只能迭代：</p>
+$$w \leftarrow w - \eta\,\frac{\partial L}{\partial w}$$
+<p><strong>梯度</strong> $\partial L/\partial w$ 指向损失上升最快的方向，所以往反方向走；<strong>学习率</strong> $\eta$ 是步长。</p>
+<div class="demo" id="gd-demo">
+  <div class="demo-title">🧪 实验：学习率和优化器</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">损失曲面（一维）与参数的移动轨迹</div><div class="chart" data-h="250"></div></div>
+      <div><div class="chart-cap">损失随迭代步数的变化</div><div class="chart" data-h="250"></div></div>
+    </div>
+    <div class="readout"></div>
+    <p class="hint">这条损失曲线有两个谷：左边深（全局最优），右边浅（局部最优）。① 普通梯度下降、学习率 0.05：稳稳滑进右边的浅谷就不动了；② 学习率调到 0.6 以上：步子太大，在谷的两侧来回弹甚至飞出去；③ 换成"动量法"并把学习率调到 0.1 左右：像一个有惯性的球，冲过小山包滚进了更深的谷；④ Adam 会自动调节步长，学习率在很大范围内都能稳定收敛（但它同样可能停在局部最优）——对学习率不敏感是它成为默认选择的原因。</p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>名词</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td><strong>批（batch）</strong></td><td>每次更新参数用的一小撮样本（如 32 个）。用小批量估计梯度又快又带点随机性，称为随机梯度下降（SGD）</td></tr>
+<tr><td><strong>轮（epoch）</strong></td><td>把全部训练样本过一遍</td></tr>
+<tr><td><strong>动量</strong></td><td>更新方向 = 当前梯度 + 上一步方向的一部分，减少来回震荡</td></tr>
+<tr><td><strong>Adam</strong></td><td>动量 + 每个参数各自的自适应步长（梯度一直很大的参数步子小一点）。深度学习的默认优化器</td></tr>
+<tr><td><strong>早停</strong></td><td>验证集误差不再下降就停止训练，防止过拟合</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="bp">
+<h2>反向传播：梯度是怎么算出来的</h2>
+<p>梯度下降需要知道损失对<strong>每一个</strong>参数的偏导数。<strong>反向传播</strong>就是用链式法则高效地算出它们的方法：先从输入到输出算一遍（前向），再从损失开始，把"误差信号"一层一层往回传（反向）。每经过一个运算，就乘上这个运算的局部导数。</p>
+<svg class="diagram" viewBox="0 0 720 96" role="img" aria-label="计算图：x 乘 w1 加 b1 过 tanh 乘 w2 得到预测再算损失">
+  <g class="d-t" text-anchor="middle">
+    <rect class="d-box" x="6" y="30" width="62" height="36" rx="8"/><text x="37" y="53">x</text>
+    <rect class="d-box" x="112" y="30" width="92" height="36" rx="8"/><text x="158" y="53">a = w₁·x</text>
+    <rect class="d-box" x="248" y="30" width="92" height="36" rx="8"/><text x="294" y="53">z = a + b₁</text>
+    <rect class="d-box" x="384" y="30" width="96" height="36" rx="8"/><text x="432" y="53">h = tanh(z)</text>
+    <rect class="d-box" x="524" y="30" width="82" height="36" rx="8"/><text x="565" y="53">ŷ = w₂·h</text>
+    <rect class="d-acc" x="650" y="30" width="64" height="36" rx="8"/><text x="682" y="53">损失 L</text>
+  </g>
+  <g class="d-ln"><path d="M68 48H110M204 48H246M340 48H382M480 48H522M606 48H648"/></g>
+  <text class="d-m" x="360" y="18" text-anchor="middle">前向：从左到右算出每个节点的值 →</text>
+  <text class="d-m" x="360" y="88" text-anchor="middle">← 反向：从损失出发，逐个节点乘上局部导数，得到 ∂L/∂（每个量）</text>
+</svg>
+<div class="demo" id="bp-demo">
+  <div class="demo-title">🧪 实验：一步一步走完前向和反向传播</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="readout"></div>
+    <p class="hint">反复点"下一步"。前向 5 步算出预测和损失；反向 4 步把梯度传回来——注意每一步都只用到"后一个节点的梯度"和"本节点的局部导数"，这就是链式法则。全部走完后点"更新参数"：三个参数各自沿负梯度走一小步，损失应该变小。再点几次，看损失一路下降。</p>
+  </div>
+</div>
+<div class="callout key"><div class="hd">为什么这很重要</div>
+<p>反向传播里的梯度是<strong>连乘</strong>出来的。网络越深（或者序列越长），连乘的项越多：如果每一项都小于 1，梯度会指数级缩小——<strong>梯度消失</strong>，前面的层学不动；如果都大于 1，则<strong>梯度爆炸</strong>。下一章会看到，普通 RNN 正是栽在这里，而 LSTM 的设计就是为了给梯度修一条不会衰减的"高速公路"。</p></div>
+</section>
+
+<section id="ts">
+<h2>把时间序列喂给神经网络</h2>
+<p>和上一章一样用滑动窗口。区别在于：机器学习模型吃的是一张二维的表，而深度学习模型吃的是<strong>三维张量</strong>：</p>
+$$\text{输入形状} = [\,\text{样本数},\ \text{时间步数},\ \text{每步的特征数}\,]$$
+<p>比如"用过去 28 天、每天 3 个特征（销量、是否促销、星期几）预测未来 7 天"，输入就是 <code>[N, 28, 3]</code>，输出是 <code>[N, 7]</code>。MLP 不理解"时间步"这个维度，只能把 28×3 摊平成 84 个数；RNN/LSTM 则按时间顺序一步一步读。</p>
+<div class="callout warn"><div class="hd">⚠️ 神经网络对数据尺度很敏感：必须标准化</div>
+<ul>
+  <li>把输入和目标都变换到 0 附近、量级为 1：常用 $(x-\mu)/\sigma$，销量类数据通常先取对数。</li>
+  <li><strong>$\mu$ 和 $\sigma$ 只能用训练集计算</strong>，再应用到验证/测试集——用全量数据算就是泄漏。</li>
+  <li>多条序列一起训练时，每条序列用自己的 $\mu,\sigma$（或每个窗口除以窗口内的均值）。</li>
+  <li>预测完记得<strong>逆变换</strong>回原始尺度再算指标。</li>
+</ul></div>
+<div class="demo" id="mlpts-demo">
+  <div class="demo-title">🧪 实验：用 MLP 预测明天的销量</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">输入是过去 14 天的销量（取对数、标准化），输出是明天的销量。训练几十轮后，网络自己发现了"看 7 天前"这个规律，误差降到季节朴素法附近或更低。它没有被告知任何关于"星期"的信息——规律完全是从窗口里的数值学出来的。下一章换成 LSTM，让网络按时间顺序读这 14 天。</p>
+  </div>
+</div>
+<details class="code" open><summary>Python 参考代码：PyTorch 的标准训练循环（之后所有模型都套这个模板）</summary>
+<pre><code>import numpy as np, torch, torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
+
+# ---------- 数据：滑动窗口 + 只用训练段统计量做标准化 ----------
+ly = np.log1p(y.values.astype("float32"))
+n_train = len(ly) - 56
+mu, sd = ly[:n_train].mean(), ly[:n_train].std()
+z = (ly - mu) / sd
+
+def windows(z, win=14, h=1):
+    X = np.stack([z[i:i + win] for i in range(len(z) - win - h + 1)])
+    Y = np.stack([z[i + win:i + win + h] for i in range(len(z) - win - h + 1)])
+    return torch.tensor(X), torch.tensor(Y)
+
+X, Y = windows(z)
+split = n_train - 14                                  # 按时间切分
+train = DataLoader(TensorDataset(X[:split], Y[:split]), batch_size=32, shuffle=True)
+Xva, Yva = X[split:], Y[split:]
+
+# ---------- 模型 ----------
+model = nn.Sequential(nn.Linear(14, 32), nn.ReLU(), nn.Dropout(0.1), nn.Linear(32, 1))
+opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+loss_fn = nn.MSELoss()
+
+# ---------- 训练循环：前向 → 损失 → 反向 → 更新；带早停 ----------
+best, patience = float("inf"), 0
+for epoch in range(200):
+    model.train()
+    for xb, yb in train:
+        opt.zero_grad()
+        loss = loss_fn(model(xb), yb)                 # 前向 + 损失
+        loss.backward()                               # 反向传播：自动算出所有梯度
+        opt.step()                                    # 梯度下降一步
+    model.eval()
+    with torch.no_grad():
+        val = loss_fn(model(Xva), Yva).item()
+    if val &lt; best - 1e-4: best, patience = val, 0; torch.save(model.state_dict(), "best.pt")
+    else:
+        patience += 1
+        if patience &gt;= 15: break                      # 早停
+
+model.load_state_dict(torch.load("best.pt", weights_only=True))
+pred = np.expm1(model(Xva).detach().numpy() * sd + mu)   # 逆变换回原尺度</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>神经元 = 加权求和 + 激活函数；激活函数提供非线性。</li>
+  <li>MLP 用很多神经元的"基本形状"叠加出复杂函数。</li>
+  <li>训练 = 用梯度下降最小化损失；学习率太大发散、太小太慢；Adam 是默认优化器。</li>
+  <li>反向传播 = 链式法则；梯度是连乘出来的，所以会消失或爆炸。</li>
+  <li>时序数据以 [样本, 时间步, 特征] 的三维张量输入；必须标准化，且统计量只能来自训练集。</li>
+  <li>防过拟合：早停、Dropout、权重衰减、更多数据。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/nnlib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+const ACTS = [['sigmoid', 'sigmoid'], ['tanh', 'tanh'], ['relu', 'ReLU'], ['linear', '线性']];
+
+/* ---------- 单个神经元 ---------- */
+Site.demo('neuron-demo', {
+  controls: [
+    { k: 'w', label: '权重 w', min: -5, max: 5, step: 0.1, value: 1.5, fmt: v => v.toFixed(1) },
+    { k: 'b', label: '偏置 b', min: -5, max: 5, step: 0.1, value: 0, fmt: v => v.toFixed(1) },
+    { k: 'act', label: '激活函数', type: 'seg', options: ACTS },
+  ],
+  render(s, d) {
+    const a = NN.ACT[s.act], xs = [], ys = [], ds = [];
+    for (let x = -4; x <= 4.001; x += 0.05) { const y = a.f(s.w * x + s.b); xs.push([+x.toFixed(2), +y.toFixed(4)]); ds.push([+x.toFixed(2), +(a.d(y) * s.w).toFixed(4)]); }
+    d.chart(0, { xAxis: { type: 'value', min: -4, max: 4, name: '输入 x', nameLocation: 'middle', nameGap: 22, scale: false }, yAxis: {}, tooltip: false,
+      series: [S.line('输出 h = σ(w·x + b)', xs, { c: 0, w: 2.5 }), S.line('导数 dh/dx', ds, { c: 1, dash: true })] });
+    const mx = Math.max(...ds.map(q => Math.abs(q[1])));
+    d.out(Site.tiles([['"门槛"位置（w·x + b = 0）', s.w !== 0 ? (-s.b / s.w).toFixed(2) : '—', '曲线的中心点'], ['导数的最大值', mx.toFixed(2), s.act === 'sigmoid' ? 'sigmoid 自身的导数最大 0.25' : s.act === 'tanh' ? 'tanh 自身的导数最大 1' : ''], ['输出范围', s.act === 'sigmoid' ? '0 ~ 1' : s.act === 'tanh' ? '−1 ~ 1' : s.act === 'relu' ? '≥ 0' : '不限']]));
+  },
+});
+
+/* ---------- MLP 现场训练 ---------- */
+const TEMP = (() => {
+  const r = TS.rng(5), all = [];
+  for (let i = 0; i < 170; i++) { const x = +(8 + 30 * r()).toFixed(1); all.push([x, Math.round(3000 + 85 * Math.max(0, x - 24) + 25 * Math.max(0, 14 - x) + 70 * r.n())]); }
+  const tr = all.slice(0, 110), te = all.slice(110), sy = NN.scaler(tr.map(q => q[1])), fx = x => (x - 23) / 9, grid = [];
+  for (let x = 8; x <= 38; x += 0.25) grid.push(x);
+  return { tr, te, sy, fx, grid, X: tr.map(q => [fx(q[0])]), Y: tr.map(q => [sy.f(q[1])]), Xt: te.map(q => [fx(q[0])]), Yt: te.map(q => [sy.f(q[1])]) };
+})();
+const tempAxis = { type: 'value', min: 8, max: 38, name: '气温 °C', nameLocation: 'middle', nameGap: 22, scale: false };
+Site.demo('mlp-demo', {
+  controls: [
+    { k: 'nh', label: '隐藏神经元个数', min: 1, max: 24, step: 1, value: 4 },
+    { k: 'act', label: '激活函数', type: 'seg', options: [['tanh', 'tanh'], ['relu', 'ReLU']] },
+    { k: 'lr', label: '学习率', type: 'seg', options: [[0.003, '0.003'], [0.02, '0.02'], [0.2, '0.2']], value: 0.02 },
+    { act: 'train', label: '▶ 训练 / 暂停', primary: true, run(s, d) { d.loop('train', () => { for (let k = 0; k < 6; k++) { s.tr.push(NN.trainEpoch(s.model, s.opt, TEMP.X, TEMP.Y, { batch: 16, rng: s.rng })); s.te.push(NN.mse(s.model, TEMP.Xt, TEMP.Yt)); } d.draw(); return s.tr.length < 600; }, 30); return false; } },
+    { act: 'reset', label: '重置', run: s => { s.key = null; } },
+  ],
+  render(s, d, changed) {
+    const key = s.nh + s.act + s.lr, p = Site.pal();
+    if (s.key !== key) { d.stop('train'); s.key = key; s.model = NN.mlp({ nin: 1, nh: s.nh, act: s.act, seed: 4, initScale: 2, spreadBias: true }); s.opt = NN.adam(s.model, s.lr); s.rng = TS.rng(1); s.tr = []; s.te = []; }
+    const m = s.model, sd = TEMP.sy.sd, mu = TEMP.sy.mu, o = m.off, H = s.nh, act = NN.ACT[s.act];
+    const series = [S.scatter('训练样本', TEMP.tr, { c: 0, size: 5, op: 0.45, ring: false })];
+    for (let j = 0; j < Math.min(H, 12); j++) series.push(S.line('单元 ' + (j + 1), TEMP.grid.map(x => [x, Math.round(mu + sd * m.w[o.W2 + j] * act.f(m.w[o.W1 + j] * TEMP.fx(x) + m.w[o.b1 + j]))]), { c: p.s[2], w: 1, op: 0.45 }));
+    series.push(S.line('网络输出', TEMP.grid.map(x => [x, Math.round(TEMP.sy.inv(m.predict([TEMP.fx(x)])[0]))]), { c: 1, w: 3 }));
+    d.chart(0, { xAxis: tempAxis, yAxis: { name: 'MW' }, legend: false, tooltip: false, series });
+    const ep = s.tr.length, rm = a => a.map(v => +(Math.sqrt(v) * sd).toFixed(1));
+    d.chart(1, { xAxis: { data: s.tr.map((_, i) => i + 1), name: '轮数', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: 'RMSE（MW）', type: 'log' }, series: [S.line('训练', rm(s.tr), { c: 0 }), S.line('测试', rm(s.te), { c: 3 })] });
+    d.out(Site.tiles([['已训练', ep + ' 轮'], ['训练 RMSE', ep ? Math.sqrt(s.tr[ep - 1]) * sd : '—', 'MW'], ['测试 RMSE', ep ? Math.sqrt(s.te[ep - 1]) * sd : '—', '噪声水平约 70 MW', ep && Math.sqrt(s.te[ep - 1]) * sd < 85 ? 'good' : ''], ['参数个数', m.n, '3 × 隐藏单元 + 1']]));
+  },
+});
+
+/* ---------- 梯度下降 ---------- */
+const lossF = w => 0.08 * w ** 4 - 0.9 * w * w + 0.5 * w + 4.2, lossG = w => 0.32 * w ** 3 - 1.8 * w + 0.5;
+Site.demo('gd-demo', {
+  controls: [
+    { k: 'opt', label: '优化器', type: 'seg', options: [['sgd', '梯度下降'], ['mom', '动量法'], ['adam', 'Adam']] },
+    { k: 'lr', label: '学习率 η', min: 0.01, max: 1, step: 0.01, value: 0.05, fmt: v => v.toFixed(2) },
+    { k: 'w0', label: '起点', min: -4, max: 4, step: 0.1, value: 3.6, fmt: v => v.toFixed(1) },
+    { k: 'steps', label: '迭代步数', min: 0, max: 80, step: 1, value: 25 },
+    { act: 'play', label: '▶ 播放', primary: true, run(s, d) { d.set('steps', 0); d.loop('play', () => { d.set('steps', s.steps + 1); d.draw(); return s.steps < 80; }, 70); return false; } },
+  ],
+  render(s, d) {
+    const path = [s.w0]; let w = s.w0, v = 0, m = 0, u = 0, diverged = false;
+    for (let t = 1; t <= s.steps; t++) {
+      const g = lossG(w);
+      if (s.opt === 'sgd') w -= s.lr * g;
+      else if (s.opt === 'mom') { v = 0.85 * v + g; w -= s.lr * v; }
+      else { m = 0.9 * m + 0.1 * g; u = 0.999 * u + 0.001 * g * g; w -= s.lr * (m / (1 - 0.9 ** t)) / (Math.sqrt(u / (1 - 0.999 ** t)) + 1e-8); }
+      if (!Number.isFinite(w) || Math.abs(w) > 6) { diverged = true; w = Math.max(-6, Math.min(6, w || 6)); path.push(w); break; }
+      path.push(w);
+    }
+    const p = Site.pal(), curve = []; for (let x = -4.6; x <= 4.6; x += 0.05) curve.push([+x.toFixed(2), +lossF(x).toFixed(3)]);
+    const clampY = y => Math.min(10, y), pts = path.map(q => [+q.toFixed(3), +clampY(lossF(q)).toFixed(3)]);
+    d.chart(0, { xAxis: { type: 'value', min: -4.6, max: 4.6, name: '参数 w', nameLocation: 'middle', nameGap: 22, scale: false }, yAxis: { name: '损失', min: 0, max: 10, scale: false }, legend: false, tooltip: false,
+      series: [S.line('损失', curve, { c: p.muted, w: 2 }), S.line('轨迹', pts, { c: 1, w: 1, op: 0.5 }), S.scatter('走过的点', pts, { c: 1, size: 6, op: 0.5, ring: false }), S.scatter('当前位置', [pts[pts.length - 1]], { c: p.crit, size: 14 })] });
+    d.chart(1, { xAxis: { data: path.map((_, i) => i), name: '迭代步数', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: '损失', min: 0, max: 10, scale: false }, legend: false, series: [S.line('损失', path.map(q => +clampY(lossF(q)).toFixed(3)), { c: 1, w: 2 })] });
+    const end = path[path.length - 1], where = diverged ? ['发散了', 'bad'] : Math.abs(lossG(end)) > 0.15 ? ['还在路上', ''] : end < 0 ? ['到达左边的深谷（全局最优）', 'good'] : ['停在右边的浅谷（局部最优）', ''];
+    d.out(Site.tiles([['当前位置 w', end.toFixed(2)], ['当前损失', lossF(end).toFixed(2), '深谷底 ' + lossF(-2.5).toFixed(1) + '，浅谷底 ' + lossF(2.22).toFixed(1)], ['当前梯度', lossG(end).toFixed(2), '接近 0 表示到了谷底'], ['状态', where[0], '', where[1]]]));
+  },
+});
+
+/* ---------- 反向传播 ---------- */
+const BP_STEPS = 9, BX = 1.5, BY = 0.4;
+const bpCalc = s => { const a = s.w1 * BX, z = a + s.b1, h = Math.tanh(z), yh = s.w2 * h, L = 0.5 * (yh - BY) ** 2, dy = yh - BY, dh = dy * s.w2, dz = dh * (1 - h * h); return { a, z, h, yh, L, dy, dh, dw2: dy * h, dz, db1: dz, da: dz, dw1: dz * BX }; };
+Site.demo('bp-demo', {
+  controls: [
+    { act: 'next', label: '下一步 ▶', primary: true, run: s => { s.stage = Math.min(BP_STEPS, (s.stage || 0) + 1); } },
+    { act: 'update', label: '更新参数（学习率 0.1）', run(s) { if ((s.stage || 0) < BP_STEPS) return; const c = bpCalc(s); s.w1 -= 0.1 * c.dw1; s.b1 -= 0.1 * c.db1; s.w2 -= 0.1 * c.dw2; s.hist.push(c.L); s.stage = 0; } },
+    { act: 'reset', label: '重置', run: s => { s.w1 = 0.8; s.b1 = -0.3; s.w2 = 1.6; s.stage = 0; s.hist = []; } },
+  ],
+  setup(s) { s.w1 = 0.8; s.b1 = -0.3; s.w2 = 1.6; s.stage = 0; s.hist = []; },
+  render(s, d) {
+    const x = BX, y = BY, st = s.stage || 0, { a, z, h, yh, L, dy, dh, dw2, dz, db1, da, dw1 } = bpCalc(s);
+    const f = v => v.toFixed(3), shown = (k, v) => (st >= k ? `<b>${f(v)}</b>` : '<span class="muted">?</span>');
+    const rows = [
+      ['输入 x', '给定', `<b>${f(x)}</b>`, '—', ''],
+      ['a = w₁·x', `w₁ = ${f(s.w1)}`, shown(1, a), st >= 9 ? `∂L/∂a = ${f(da)}　<span class="tag">∂L/∂w₁ = ∂L/∂a · x = ${f(dw1)}</span>` : '', 1, 9],
+      ['z = a + b₁', `b₁ = ${f(s.b1)}`, shown(2, z), st >= 8 ? `∂L/∂z = ∂L/∂h · (1 − h²) = ${f(dz)}　<span class="tag">∂L/∂b₁ = ${f(db1)}</span>` : '', 2, 8],
+      ['h = tanh(z)', '激活函数', shown(3, h), st >= 7 ? `∂L/∂h = ∂L/∂ŷ · w₂ = ${f(dh)}` : '', 3, 7],
+      ['ŷ = w₂·h', `w₂ = ${f(s.w2)}`, shown(4, yh), st >= 6 ? `∂L/∂ŷ = ŷ − y = ${f(dy)}　<span class="tag">∂L/∂w₂ = ∂L/∂ŷ · h = ${f(dw2)}</span>` : '', 4, 6],
+      ['L = ½(ŷ − y)²', `目标 y = ${f(y)}`, shown(5, L), st >= 6 ? '∂L/∂L = 1（起点）' : '', 5, 6],
+    ];
+    const hl = rows.findIndex(r => r[4] === st || (st > 5 && r[5] === st));
+    const msg = st === 0 ? '点"下一步"开始前向传播。' : st <= 5 ? `前向第 ${st} / 5 步` : st < 9 ? `反向第 ${st - 5} / 4 步：把梯度从后往前传` : '前向、反向都完成了。三个参数的梯度已经算出，可以点"更新参数"。';
+    d.out(`<div class="small" style="margin-bottom:6px"><span class="tag ${st === 9 ? 'good' : ''}">${msg}</span></div>` +
+      Site.table(['节点', '参数', '前向：节点的值', '反向：损失对它的梯度'], rows.map(r => r.slice(0, 4)), { hl }) +
+      (s.hist.length ? `<div class="small">每次更新前的损失：${s.hist.map(f).join(' → ')} → <b>${f(L)}</b>${L < s.hist[s.hist.length - 1] ? ' <span class="tag good">在下降</span>' : ''}</div>` : ''));
+  },
+});
+
+/* ---------- MLP 预测销量 ---------- */
+Site.demo('mlpts-demo', {
+  controls: [
+    { act: 'train', label: '▶ 训练 / 暂停', primary: true, run(s, d) { d.loop('train', () => { for (let k = 0; k < 4; k++) s.hist.push(NN.trainEpoch(s.model, s.opt, s.X, s.Y, { batch: 32, rng: s.rng })); d.draw(); return s.hist.length < 120; }, 20); return false; } },
+    { act: 'reset', label: '重置', run: (s, d) => { d.stop('train'); s.init(); } },
+  ],
+  setup(s) {
+    const ds = TS.data.retail(), a = 300, cut = 976, win = 14, ly = ds.y.map(Math.log), sc = NN.scaler(ly.slice(a, cut)), z = ly.map(sc.f);
+    s.ds = ds; s.cut = cut; s.win = win; s.sc = sc; s.z = z; s.X = []; s.Y = [];
+    for (let t = a + win; t < cut; t++) { s.X.push(z.slice(t - win, t)); s.Y.push([z[t]]); }
+    s.init = () => { s.model = NN.mlp({ nin: win, nh: 16, act: 'tanh', seed: 7 }); s.opt = NN.adam(s.model, 0.004); s.rng = TS.rng(2); s.hist = []; };
+    s.init();
+  },
+  render(s, d) {
+    const { ds, cut, win, z, sc } = s, h = 56, actual = ds.y.slice(cut, cut + h), pred = [];
+    for (let t = cut; t < cut + h; t++) pred.push(Math.exp(sc.inv(s.model.predict(z.slice(t - win, t))[0])));
+    const sn = actual.map((_, j) => ds.y[cut + j - 7]), nv = actual.map((_, j) => ds.y[cut + j - 1]);
+    d.chart(0, { xAxis: { data: ds.dates.slice(cut, cut + h) }, yAxis: { name: '件' }, series: [S.line('实际', actual, { c: 0 }), S.line('MLP 的一步预测', pred.map(Math.round), { c: 1, w: 2.2 }), S.line('季节朴素（7 天前）', sn, { c: Site.pal().muted, dash: true, w: 1.2 })] });
+    const m = TS.metrics(actual, pred), m7 = TS.metrics(actual, sn), m1 = TS.metrics(actual, nv);
+    d.out(Site.tiles([['已训练', s.hist.length + ' 轮', s.hist.length ? '训练 MSE ' + s.hist[s.hist.length - 1].toFixed(3) : '点"训练"开始'], ['MLP · 测试 MAE', m.mae, 'WAPE ' + Site.pct(m.wape), m.mae < m7.mae ? 'good' : ''], ['季节朴素 · MAE', m7.mae], ['朴素（昨天）· MAE', m1.mae]]));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '如果把神经网络里所有的激活函数都去掉（只剩加权求和），会怎样？', opts: ['网络训练得更快、效果更好', '无论多少层，整个网络都等价于一个线性模型，无法表达非线性关系', '网络无法进行反向传播', '没有影响'], ans: 1, why: '线性变换的叠加还是线性变换。非线性激活是神经网络表达能力的来源。' },
+  { q: '训练时损失在几个值之间来回剧烈震荡，甚至越来越大。最可能的原因是？', opts: ['学习率太大', '学习率太小', '数据太多', '隐藏层太小'], ans: 0, why: '步子太大，每一步都跨过了谷底，落到对面更高的坡上。应减小学习率（或做梯度裁剪）。' },
+  { q: '反向传播计算梯度时，靠近输入的层的梯度是很多项连乘的结果。如果这些项都明显小于 1，会发生什么？', opts: ['梯度爆炸', '梯度消失：前面的层几乎得不到更新', '损失变成负数', '过拟合'], ans: 1, why: '很多个小于 1 的数相乘趋近于 0。sigmoid/tanh 的饱和区导数接近 0，更容易引发这个问题。' },
+  { q: '用神经网络预测销量，标准化时应该怎么计算均值和标准差？', opts: ['用全部数据（训练 + 验证 + 测试）', '只用训练集，然后把同样的参数应用到验证集和测试集', '训练、验证、测试各自单独计算', '不需要标准化'], ans: 1, why: '用到验证/测试段的统计量等于偷看了未来。统计量必须来自训练段，并原样应用到其他段。' },
+  { q: '回归任务的输出层通常用什么激活函数？', opts: ['sigmoid，把输出压到 0–1', 'tanh', '不用激活函数（线性输出）', 'ReLU 后再接 sigmoid'], ans: 2, why: '预测值可以是任意实数，不应被压缩到固定区间。输出层保持线性，尺度问题通过标准化目标值来处理。' },
+]);
+</script>
+</body>
+</html>
