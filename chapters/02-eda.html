@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>02 探索分析与分解 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="02">
+<main>
+<p class="lead">拿到一条时间序列，第一件事永远是<strong>画出来看</strong>。这一章介绍四件探索工具：移动平均看趋势、季节图看节奏、分解把成分拆开、滞后图看"记忆"。它们既是建模前的侦察，也是日常业务分析里最常用的手段。</p>
+
+<section id="look">
+<h2>先画图：看什么</h2>
+<p>看一条曲线时，按下面的清单逐项过一遍，基本就知道后面该用什么方法了：</p>
+<div class="tw"><table>
+<thead><tr><th>看什么</th><th>怎么看</th><th>看到之后意味着</th></tr></thead>
+<tbody>
+<tr><td>趋势</td><td>整体在涨、跌还是持平？是直线还是在拐弯？</td><td>模型要有趋势项，或先做差分（第 04 章）</td></tr>
+<tr><td>季节</td><td>有没有固定间隔的重复？周期是 7、12、24 还是多个叠加？</td><td>决定季节周期参数 $m$</td></tr>
+<tr><td>波动幅度</td><td>波动随水平变大而变大吗？</td><td>是 → 乘法模型或先取对数</td></tr>
+<tr><td>尖峰与凹坑</td><td>个别点特别高或特别低？能对上促销/节假日吗？</td><td>对得上是事件，对不上要查是否异常（第 03 章）</td></tr>
+<tr><td>结构变化</td><td>某个时间点前后，水平或规律突然不一样？</td><td>可能是口径变更或业务变化，老数据未必还能用</td></tr>
+<tr><td>缺口</td><td>有没有断线、连续的 0、一段平线？</td><td>数据质量问题，先清洗（第 03 章）</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="ma">
+<h2>移动平均：把噪声抹掉看趋势</h2>
+<p><strong>移动平均</strong>（Moving Average）用一个窗口内的平均值代替每个点，噪声和短周期波动互相抵消，趋势就浮现出来。看板上常见的"7 日均线""28 日均线"就是它。</p>
+$$\text{居中：}\; \hat T_t = \frac{1}{w}\sum_{j=-k}^{k} y_{t+j}\;(w = 2k+1) \qquad \text{只看过去：}\; \hat T_t = \frac{1}{w}\sum_{j=0}^{w-1} y_{t-j}$$
+
+<div class="demo" id="ma-demo">
+  <div class="demo-title">🧪 实验：移动平均的窗口该取多大</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+    <p class="hint">试一试：① 窗口从 1 慢慢拉到 7——到 7 的那一刻曲线突然变得很平，因为窗口刚好盖住一个完整的周，周内的高低正好抵消；② 窗口取 5 或 10，曲线反而有残留的锯齿；③ 切到"只看过去"，注意均线比真实走势<strong>慢半拍</strong>——窗口越大滞后越多。</p>
+  </div>
+</div>
+<div class="callout key">
+  <div class="hd">两条经验</div>
+  <ul>
+    <li><strong>窗口取季节周期的整数倍</strong>（7、14、28；12、24），才能把季节抹干净。</li>
+    <li><strong>居中平均用于事后分析</strong>（它用到了未来的值）；<strong>实时监控和做特征只能用"只看过去"的版本</strong>，代价是滞后。把居中平均当特征喂给模型是一种典型的数据泄漏（第 08 章）。</li>
+  </ul>
+</div>
+</section>
+
+<section id="season">
+<h2>季节图：把每个周期叠在一起看</h2>
+<p>把数据按"在周期中的位置"分组——星期几、几点钟、几月份——节奏就一目了然。为了不让趋势干扰，下面的图用的是<strong>相对趋势的比例</strong>（实际值 ÷ 居中移动平均），1.0 表示"和平均水平一样"。</p>
+<div class="demo" id="season-demo">
+  <div class="demo-title">🧪 实验：季节图</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">每个位置的分布（箱线图：盒子是中间 50%，须是 5%–95%）</div>
+    <div class="chart" data-h="250"></div>
+    <div class="chart-cap">最近若干个周期叠在一起（颜色越深越新）</div>
+    <div class="chart" data-h="250"></div>
+    <div class="readout"></div>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 季节图在业务里的用法</div>
+  <ul>
+    <li><strong>排班与备货节奏</strong>：周六比周二高多少，直接决定各天的人手和到货量。</li>
+    <li><strong>发现节奏变化</strong>：叠线图里新周期（深色）和老周期（浅色）形状不一样，说明用户行为变了，老的季节规律要打折。</li>
+    <li><strong>盒子特别长的位置</strong>说明那天波动大（比如周五有时赶上促销），预测时要给更宽的区间。</li>
+  </ul>
+</div>
+</section>
+
+<section id="decomp">
+<h2>分解：把趋势、季节、残差拆开</h2>
+<p><strong>经典分解</strong>的做法只有三步，全部由上面两个工具组成：</p>
+<ol>
+  <li><strong>趋势</strong> = 窗口为一个周期的居中移动平均；</li>
+  <li><strong>季节</strong> = 去掉趋势后，按周期位置求平均（就是季节图的中心线），再归一化；</li>
+  <li><strong>残差</strong> = 观测值去掉趋势和季节之后剩下的部分。</li>
+</ol>
+<p>加法模型里"去掉"是减法，乘法模型里是除法。分解得好不好，<strong>看残差</strong>：好的残差应该是没有规律的小幅波动；如果残差里还能看出周期或喇叭口，说明模型形式选错了。</p>
+
+<div class="demo" id="decomp-demo">
+  <div class="demo-title">🧪 实验：分解一条序列</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">观测值与趋势</div>
+    <div class="chart" data-h="200"></div>
+    <div class="chart-cap">季节成分</div>
+    <div class="chart" data-h="150"></div>
+    <div class="chart-cap">残差</div>
+    <div class="chart" data-h="150"></div>
+    <div class="readout"></div>
+    <p class="hint">选"月度销售额"并切到<strong>加法</strong>：残差前期小、后期大，还带着周期——这是选错模型的信号。切回<strong>乘法</strong>，残差变成均匀的小波动。再看"电商销量"的残差：几个巨大的尖刺正是 618、双 11 和春节——分解是发现事件和异常的好工具。</p>
+  </div>
+</div>
+
+<h3>经典分解的局限与 STL</h3>
+<p>经典分解简单直观，但有三个硬伤：首尾各丢半个周期（居中平均算不出来）；假设季节形状永远不变；对异常值敏感（一个双 11 会把周围的趋势拉高）。实际工作中更常用 <strong>STL</strong>（Seasonal-Trend decomposition using LOESS）：</p>
+<ul>
+  <li>用局部加权回归（LOESS）代替移动平均，首尾也有值；</li>
+  <li>季节成分可以随时间缓慢变化；</li>
+  <li>有稳健模式，异常点会被自动降权，不会污染趋势和季节；</li>
+  <li>多重季节（比如小时数据同时有日周期和周周期）用它的扩展 <strong>MSTL</strong>。</li>
+</ul>
+<details class="code"><summary>Python 参考代码：经典分解、STL、MSTL</summary>
+<pre><code>from statsmodels.tsa.seasonal import seasonal_decompose, STL, MSTL
+
+# 经典分解（乘法）
+res = seasonal_decompose(y, model="multiplicative", period=7)
+res.plot()
+
+# STL：只支持加法，乘法结构先取对数；robust=True 抵抗异常值
+import numpy as np
+stl = STL(np.log(y), period=7, robust=True).fit()
+trend, seasonal, resid = stl.trend, stl.seasonal, stl.resid
+
+# 小时数据：日周期 24 + 周周期 168
+mstl = MSTL(load, periods=(24, 24 * 7)).fit()
+
+# 季节强度（0~1）：越接近 1 季节越明显
+strength_s = max(0, 1 - resid.var() / (seasonal + resid).var())</code></pre></details>
+</section>
+
+<section id="lag">
+<h2>滞后图：今天和 k 天前有多像</h2>
+<p>把每个点的值 $y_t$ 和它 $k$ 步之前的值 $y_{t-k}$ 配成一对画散点图，就是<strong>滞后图</strong>。点越集中在一条斜线上，说明"$k$ 天前的值"对今天越有预测力。这种相关性的强度就是<strong>自相关系数</strong> $r_k$，第 04 章会系统地讲。</p>
+<div class="demo" id="lag-demo">
+  <div class="demo-title">🧪 实验：滞后散点图</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">滞后散点图</div><div class="chart" data-h="270"></div></div>
+      <div><div class="chart-cap">各个滞后的相关系数（当前滞后高亮）</div><div class="chart" data-h="270"></div></div>
+    </div>
+    <div class="readout"></div>
+    <p class="hint">保持"先去掉趋势"勾选，把滞后从 1 拉到 14：到 7 和 14 时散点收拢成一条斜线，这就是周季节；滞后 3、4 时反而是负相关（周末对上了工作日）。然后<strong>取消勾选</strong>：所有滞后都高度相关——那是趋势造成的假象（早期低、后期高，任意两天都"同高同低"）。所以看自相关之前要先处理趋势。换成"电商销量"再看：大促和春节会让散点图多出一些离群点。</p>
+  </div>
+</div>
+</section>
+
+<section id="yoy">
+<h2>业务最常用的对比：环比与同比</h2>
+<p>业务周报里最常见的两个数是<strong>环比</strong>（和上一期比）和<strong>同比</strong>（和上一个周期的同一位置比）。它们本质上就是滞后 1 和滞后 $m$ 的变化率——而选错了滞后，看到的全是季节噪声。</p>
+<div class="demo" id="yoy-demo">
+  <div class="demo-title">🧪 实验：日活的"日环比"为什么没法看</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="280"></div>
+    <div class="readout"></div>
+    <p class="hint">日环比每周规律性地上蹿下跳（周六比周五高、周一比周日低），真正的异常被淹没在里面；换成"周同比"（和上周同一天比），季节被抵消，曲线贴着 0 走，那次故障造成的下跌一眼就能看见。</p>
+  </div>
+</div>
+<div class="callout warn">
+  <div class="hd">⚠️ 同比也有坑</div>
+  <ul>
+    <li><strong>节假日错位</strong>：春节每年公历日期不同，1–2 月的同比天然失真；应按"距春节第几天"对齐后再比。</li>
+    <li><strong>基数效应</strong>：去年同期如果有大促或故障，今年同比会被动地显得很差或很好。</li>
+    <li><strong>星期错位</strong>：按日期做年同比时，去年同一天可能是周末而今年是工作日；日粒度应按"去年同一周的同一个星期几"对齐。</li>
+  </ul>
+</div>
+<details class="code"><summary>Python 参考代码：移动平均、环比同比、滞后图、自相关</summary>
+<pre><code>import pandas as pd
+from pandas.plotting import lag_plot, autocorrelation_plot
+
+ma7  = y.rolling(7).mean()                 # 只看过去的 7 日均线（可用于实时/特征）
+ma7c = y.rolling(7, center=True).mean()    # 居中（只用于事后分析）
+
+dod = y.pct_change(1)                      # 日环比
+wow = y.pct_change(7)                      # 周同比（和上周同一天比）
+yoy = y.pct_change(364)                    # 年同比：用 364 天对齐星期几，而不是 365
+
+lag_plot(y, lag=7)                         # 滞后散点图
+print(y.autocorr(lag=7))                   # 滞后 7 的自相关系数
+
+# 按星期几看季节（先除以趋势）
+ratio = y / ma7c
+print(ratio.groupby(ratio.index.dayofweek).describe())</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>移动平均的窗口取季节周期的整数倍；居中版本用了未来信息，只能用于事后分析。</li>
+  <li>季节图 = 按周期位置分组看分布，先除掉趋势再看更干净。</li>
+  <li>分解 = 趋势（移动平均）+ 季节（按位置平均）+ 残差；<strong>残差有没有规律</strong>是检验分解/模型的标准。</li>
+  <li>实际工作优先用 STL（稳健、季节可变）；多重季节用 MSTL。</li>
+  <li>看自相关、看环比之前先处理趋势和季节，否则看到的是它们的影子。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+const DS_OPTS = [['retail', '电商销量'], ['dau', 'App 日活'], ['monthly', '月度销售额'], ['load', '电力负荷']];
+
+/* ---------- 移动平均 ---------- */
+Site.demo('ma-demo', {
+  controls: [
+    { k: 'w', label: '窗口大小', min: 1, max: 42, step: 1, value: 3, fmt: v => v + ' 天' },
+    { k: 'mode', label: '窗口位置', type: 'seg', options: [['center', '居中'], ['trail', '只看过去']] },
+  ],
+  render(s, d) {
+    const ds = TS.data.retail(), a = 760, b = 940, y = ds.y.slice(a - 60, b + 60);
+    const ma = TS.ma(y, s.w, s.mode === 'center').slice(60, 60 + b - a), raw = y.slice(60, 60 + b - a);
+    d.chart(0, { xAxis: { data: ds.dates.slice(a, b) }, yAxis: { name: '件' }, series: [S.line('日销量', raw, { c: 0, w: 1, op: 0.55 }), S.line(s.w + ' 日移动平均', ma, { c: 1, w: 2.5 })] });
+    const rough = TS.std(TS.diff(ma.filter(Number.isFinite)));
+    d.out(Site.tiles([
+      ['窗口', s.w + ' 天', s.w % 7 === 0 ? '是 7 的整数倍 ✓' : '不是 7 的整数倍', s.w % 7 === 0 ? 'good' : ''],
+      ['均线的"毛糙度"', rough, '相邻两天变化的标准差，越小越平滑'],
+      ['滞后', s.mode === 'center' ? '0 天' : ((s.w - 1) / 2).toFixed(1) + ' 天', s.mode === 'center' ? '但用到了未来的值' : '平均慢这么多'],
+    ]));
+  },
+});
+
+/* ---------- 季节图 ---------- */
+const SEASON = {
+  retail: { name: '电商销量 · 按星期', m: 7, labels: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'], phase: (ds, i) => TS.dow(ds.dates[i]), cycles: 12 },
+  load: { name: '电力负荷 · 按小时', m: 24, labels: Array.from({ length: 24 }, (_, h) => h + '时'), phase: (ds, i) => i % 24, cycles: 14 },
+  monthly: { name: '月度销售额 · 按月份', m: 12, labels: Array.from({ length: 12 }, (_, k) => (k + 1) + '月'), phase: (ds, i) => i % 12, cycles: 10 },
+};
+Site.demo('season-demo', {
+  controls: [{ k: 'ds', label: '数据与分组方式', type: 'seg', options: [['retail', '销量·按星期'], ['load', '负荷·按小时'], ['monthly', '月销·按月份']] }],
+  render(s, d) {
+    const cfg = SEASON[s.ds], ds = TS.data[s.ds](), m = cfg.m, p = Site.pal();
+    const tr = TS.ma(ds.y, m, true), ratio = ds.y.map((v, i) => v / tr[i]);
+    const groups = Array.from({ length: m }, () => []);
+    ratio.forEach((v, i) => { if (Number.isFinite(v)) groups[cfg.phase(ds, i)].push(v); });
+    const box = groups.map(g => [0.05, 0.25, 0.5, 0.75, 0.95].map(q => +TS.quantile(g, q).toFixed(3)));
+    d.chart(0, {
+      xAxis: { data: cfg.labels }, yAxis: { name: '相对趋势的比例' }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `${q.name}<br>中位数 <b>${q.value[3]}</b><br>中间 50%：${q.value[2]} ~ ${q.value[4]}<br>5%~95%：${q.value[1]} ~ ${q.value[5]}` },
+      series: [{ type: 'boxplot', name: '分布', data: box, itemStyle: { color: p.dark ? '#13243a' : '#e8f1fc', borderColor: p.s[0], borderWidth: 1.5 }, boxWidth: [8, 28] }],
+    });
+    // 叠线：最近若干个完整周期
+    const first = cfg.phase(ds, 0), start0 = (m - first) % m, total = Math.floor((ds.y.length - start0) / m);
+    const lines = [], nC = Math.min(cfg.cycles, total);
+    for (let c = total - nC; c < total; c++) {
+      const st = start0 + c * m, seg = ratio.slice(st, st + m);
+      if (seg.some(v => !Number.isFinite(v))) continue;
+      const k = (c - (total - nC)) / Math.max(1, nC - 1);
+      lines.push(S.line(s.ds === 'monthly' ? ds.dates[st].slice(0, 4) + ' 年' : ds.dates[st].slice(0, 10) + ' 起', seg.map(v => +v.toFixed(3)), { c: p.s[0], w: 1 + k, op: 0.2 + 0.8 * k }));
+    }
+    d.chart(1, { xAxis: { data: cfg.labels }, yAxis: { name: '相对趋势的比例' }, legend: false, series: lines });
+    const med = box.map(b => b[2]), hi = med.indexOf(Math.max(...med)), lo = med.indexOf(Math.min(...med));
+    d.out(Site.tiles([
+      ['最高的位置', cfg.labels[hi], '中位数 ' + med[hi].toFixed(2) + ' 倍', 'good'],
+      ['最低的位置', cfg.labels[lo], '中位数 ' + med[lo].toFixed(2) + ' 倍'],
+      ['峰谷差', Site.pct(med[hi] / med[lo] - 1), '最高比最低多这么多'],
+    ]));
+  },
+});
+
+/* ---------- 分解 ---------- */
+Site.demo('decomp-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'select', options: DS_OPTS, value: 'monthly' },
+    { k: 'type', label: '模型形式', type: 'seg', options: [['mul', '乘法'], ['add', '加法']] },
+  ],
+  render(s, d) {
+    const ds = TS.data[s.ds](), m = ds.period, n = Math.min(ds.y.length, s.ds === 'load' ? 24 * 21 : 9999);
+    const y = ds.y.slice(-n), x = ds.dates.slice(-n), dc = TS.decompose(y, m, s.type), mul = s.type === 'mul';
+    d.chart(0, { xAxis: { data: x }, yAxis: { name: ds.unit }, series: [S.line('观测值', y, { c: 0, w: 1.2, op: 0.7 }), S.line('趋势', dc.trend, { c: 1, w: 2.5 })] });
+    d.chart(1, { xAxis: { data: x }, yAxis: { name: mul ? '倍数' : ds.unit }, legend: false, series: [S.line('季节', dc.seasonal, { c: 2, w: 1.5 })] });
+    const base = mul ? 1 : 0;
+    d.chart(2, { xAxis: { data: x }, yAxis: { name: mul ? '倍数' : ds.unit }, legend: false, series: [Object.assign(S.line('残差', dc.resid, { c: 6, w: 1 }), { markLine: S.hline(base) })] });
+    // 季节强度 / 趋势强度（乘法在对数尺度上算）
+    const f = v => mul ? Math.log(v) : v, ok = dc.resid.map((v, i) => Number.isFinite(v));
+    const R = dc.resid.filter((_, i) => ok[i]).map(f), Sx = dc.seasonal.filter((_, i) => ok[i]).map(f), T = dc.trend.filter((_, i) => ok[i]).map(f);
+    const vR = TS.variance(R), FS = Math.max(0, 1 - vR / TS.variance(Sx.map((v, i) => v + R[i]))), FT = Math.max(0, 1 - vR / TS.variance(T.map((v, i) => v + R[i])));
+    // 残差是否"前小后大"：后半段标准差 / 前半段标准差
+    const half = R.length >> 1, fan = TS.std(dc.resid.filter(Number.isFinite).slice(half)) / TS.std(dc.resid.filter(Number.isFinite).slice(0, half));
+    const rAc = TS.acf(dc.resid.filter(Number.isFinite), m)[m];
+    d.out(Site.tiles([
+      ['趋势强度', FT.toFixed(2), '0~1，越大越明显'],
+      ['季节强度', FS.toFixed(2), '0~1，越大越明显'],
+      ['残差：后半段 ÷ 前半段波动', fan.toFixed(2), fan > 1.3 ? '前小后大 → 模型形式可能不对' : '比较均匀', fan > 1.3 ? 'bad' : 'good'],
+      ['残差里剩余的季节相关', rAc.toFixed(2), Math.abs(rAc) > 0.3 ? '残差里还有周期没拆干净' : '基本拆干净了', Math.abs(rAc) > 0.3 ? 'bad' : 'good'],
+    ]));
+  },
+});
+
+/* ---------- 滞后图 ---------- */
+Site.demo('lag-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'select', options: DS_OPTS.slice(0, 3), value: 'dau' },
+    { k: 'lag', label: '滞后 k', min: 1, max: 30, step: 1, value: 1 },
+    { k: 'det', label: '先去掉趋势（除以移动平均）', type: 'check', value: true },
+  ],
+  render(s, d) {
+    const ds = TS.data[s.ds](), m = ds.period, p = Site.pal();
+    let y = ds.y;
+    if (s.det) { const tr = TS.ma(ds.y, m, true); y = ds.y.map((v, i) => v / tr[i]).filter(Number.isFinite); }
+    const k = Math.min(s.lag, y.length - 5), pts = [];
+    for (let i = k; i < y.length; i++) pts.push([+y[i - k].toFixed(3), +y[i].toFixed(3)]);
+    const ac = TS.acf(y, 30);
+    d.chart(0, {
+      xAxis: { type: 'value', name: `k=${k} 步之前的值`, nameLocation: 'middle', nameGap: 24 }, yAxis: { name: '当前值' }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `${k} 步前：${q.value[0]}<br>当前：${q.value[1]}` },
+      series: [S.scatter('点对', pts, { c: 0, size: 5, op: 0.5, ring: false })],
+    });
+    d.chart(1, {
+      xAxis: { data: ac.slice(1).map((_, i) => i + 1), name: '滞后', nameLocation: 'middle', nameGap: 24 }, yAxis: { min: -1, max: 1, scale: false }, legend: false,
+      series: [{ type: 'bar', name: '相关系数', data: ac.slice(1).map((v, i) => ({ value: +v.toFixed(3), itemStyle: { color: i + 1 === k ? p.s[1] : p.s[0], opacity: i + 1 === k ? 1 : 0.55 } })), barMaxWidth: 12 }],
+    });
+    const r = ac[k];
+    d.out(Site.tiles([
+      ['滞后', k], ['相关系数 r', r.toFixed(2), Math.abs(r) > 0.7 ? '强相关' : Math.abs(r) > 0.3 ? '中等相关' : '基本无关', Math.abs(r) > 0.7 ? 'good' : ''],
+      ['相关最强的滞后', ac.indexOf(Math.max(...ac.slice(1))), 'r = ' + Math.max(...ac.slice(1)).toFixed(2)],
+    ]));
+  },
+});
+
+/* ---------- 环比与同比 ---------- */
+Site.demo('yoy-demo', {
+  controls: [{ k: 'mode', label: '对比方式', type: 'seg', options: [['dod', '日环比（和昨天比）'], ['wow', '周同比（和上周同一天比）']] }],
+  render(s, d) {
+    const ds = TS.data.dau(), a = 150, b = 300, lag = s.mode === 'dod' ? 1 : 7;
+    const chg = [], x = ds.dates.slice(a, b);
+    for (let i = a; i < b; i++) chg.push(+((ds.y[i] / ds.y[i - lag] - 1) * 100).toFixed(2));
+    const ser = S.line(s.mode === 'dod' ? '日环比 %' : '周同比 %', chg, { c: s.mode === 'dod' ? 4 : 0 });
+    ser.markLine = S.hline(0);
+    const an = ds.anomalies.filter(i => i >= a && i < b);
+    ser.markPoint = { symbol: 'circle', symbolSize: 9, itemStyle: { color: Site.pal().crit }, label: { show: true, formatter: '故障', position: 'bottom', color: Site.pal().ink2, fontSize: 11 }, data: an.slice(0, 1).map(i => ({ coord: [i - a, chg[i - a]] })) };
+    d.chart(0, { xAxis: { data: x }, yAxis: { name: '%' }, legend: false, series: [ser] });
+    const normal = chg.filter((_, i) => !an.some(q => Math.abs(q - a - i) <= 8));
+    const dip = chg[an[0] - a], sd = TS.std(normal);
+    d.out(Site.tiles([
+      ['平时的波动（标准差）', sd.toFixed(1) + ' 个百分点', '越小，异常越显眼'],
+      ['故障当天的变化', dip.toFixed(1) + '%'],
+      ['故障 ÷ 平时波动', (Math.abs(dip) / sd).toFixed(1) + ' 倍', Math.abs(dip) / sd > 10 ? '一眼可见' : '被季节波动稀释', Math.abs(dip) / sd > 10 ? 'good' : 'bad'],
+    ]));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '日销量数据有明显的周内规律。想用移动平均看趋势，窗口最合适取多少？', opts: ['3', '5', '7', '10'], ans: 2, why: '窗口等于季节周期（或其整数倍）时，每个窗口里都恰好包含完整的一周，周内高低相互抵消，只剩趋势。' },
+  { q: '用加法模型分解后，残差的波动"前期小、后期大"，而且还带着周期。应该怎么办？', opts: ['增大移动平均窗口', '改用乘法模型，或先取对数再做加法分解', '删除后半段数据', '说明数据没有季节性'], ans: 1, why: '残差随水平放大、还残留周期，说明季节幅度是按比例变化的——乘法结构。换乘法或取对数后残差会变均匀。' },
+  { q: '为什么"居中移动平均"不能直接当作预测模型的输入特征？', opts: ['计算太慢', '它用到了当前时刻之后的数据，预测时这些数据还不存在', '它会放大噪声', '它只适用于月度数据'], ans: 1, why: '居中窗口包含未来的值。训练时能算出来，上线预测时算不出来——典型的数据泄漏。做特征只能用"只看过去"的滚动统计。' },
+  { q: '日活数据周末高、工作日低。周一早上看到"日环比 -9%"，最合理的第一反应是？', opts: ['立刻拉群排查故障', '先看周同比（和上周一比），判断是否只是正常的周内回落', '说明用户在流失', '把日环比的告警阈值调到 -5%'], ans: 1, why: '周日到周一的回落是季节规律。和上周同一天比才能抵消季节，看出真实变化。' },
+]);
+</script>
+</body>
+</html>

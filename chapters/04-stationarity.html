@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>04 平稳性、差分与自相关 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="04">
+<main>
+<p class="lead">预测的前提是"过去的规律在未来仍然成立"。<strong>平稳性</strong>就是这句话的数学版本。这一章讲清楚三件事：什么样的序列是平稳的、不平稳时怎么用差分把它变平稳、以及怎么用 ACF / PACF 这两张图读出一条序列的"记忆结构"——它们是下一步学 ARIMA 的全部预备知识。</p>
+
+<section id="why">
+<h2>平稳性：规律不随时间漂移</h2>
+<p>一条序列是<strong>（弱）平稳</strong>的，指它的统计性质不随时间改变：</p>
+<ul>
+  <li><strong>均值恒定</strong>——没有趋势，围绕一个固定水平波动；</li>
+  <li><strong>方差恒定</strong>——波动幅度前后一致，没有喇叭口；</li>
+  <li><strong>自相关只取决于间隔</strong>——"今天和昨天的关系"在去年和今年是一样的。</li>
+</ul>
+<p>直觉上：从平稳序列里任意截两段出来，你分辨不出哪段在前、哪段在后。有趋势、有季节、波动越来越大的序列都不平稳——而业务数据几乎全是这样。所以我们不指望原始数据平稳，而是<strong>通过变换把它变成平稳的</strong>，在平稳的部分上建模，再变换回去。</p>
+<div class="callout biz">
+  <div class="hd">💼 为什么业务分析也要懂这个</div>
+  <p>两条都在增长的指标（比如"公司员工数"和"App 日活"）相关系数可以高达 0.9，但这不代表招人能涨日活——它们只是都在随时间增长。不平稳的序列之间会出现大量<strong>虚假的相关</strong>，下面第三个实验会让你亲眼看到。</p>
+</div>
+</section>
+
+<section id="zoo">
+<h2>三种基本过程：白噪声、AR(1)、随机游走</h2>
+<p>用一个最简单的公式就能造出三种性格完全不同的序列：</p>
+$$y_t = c + \phi\, y_{t-1} + \varepsilon_t,\qquad \varepsilon_t \sim \text{独立的随机冲击}$$
+<div class="tw"><table>
+<thead><tr><th>$\phi$</th><th>名字</th><th>性格</th><th>最佳预测</th></tr></thead>
+<tbody>
+<tr><td>$0$</td><td><strong>白噪声</strong></td><td>完全没有记忆，每一步都是独立的</td><td>均值（没有任何可利用的规律）</td></tr>
+<tr><td>$0&lt;\phi&lt;1$</td><td><strong>平稳 AR(1)</strong></td><td>有记忆但会遗忘：偏离均值后逐渐被拉回来（均值回复）</td><td>介于当前值和均值之间，越远越靠近均值</td></tr>
+<tr><td>$1$</td><td><strong>随机游走</strong></td><td>永不遗忘：每次冲击都永久保留，没有"应该回到的水平"</td><td>就是当前值（明天最可能等于今天）</td></tr>
+<tr><td>$&gt;1$</td><td>爆炸过程</td><td>偏离被不断放大</td><td>现实中很少持续存在</td></tr>
+</tbody></table></div>
+<div class="demo" id="sim">
+  <div class="demo-title">🧪 实验：把 φ 从 0 拧到 1</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+    <p class="hint">选"30 条"同时看很多条路径：φ 小于 1 时，所有路径被圈在一条固定宽度的带子里（平稳）；φ 拧到 1 的瞬间，带子变成不断张开的喇叭口——随机游走的不确定性随时间无限增大。再给一点"漂移"，随机游走就有了趋势：这就是很多业务指标"趋势 + 随机游走"的样子。</p>
+  </div>
+</div>
+<div class="callout key">
+  <div class="hd">两个贯穿全课的结论</div>
+  <ul>
+    <li><strong>好模型的残差应该是白噪声。</strong>如果残差里还有规律，说明模型没把能预测的部分榨干（第 07 章用这个标准做诊断）。</li>
+    <li><strong>随机游走的最佳预测是"和现在一样"。</strong>股价接近随机游走，所以任何模型都很难显著打败"明天价格 = 今天价格"。遇到这种数据，诚实的做法是承认它不可预测，把精力放在估计波动范围上。</li>
+  </ul>
+</div>
+</section>
+
+<section id="spurious">
+<h2>伪回归：两条毫无关系的序列为什么"高度相关"</h2>
+<p>生成两条<strong>完全独立</strong>的随机游走，算它们的相关系数。按理说应该接近 0——真的吗？</p>
+<div class="demo" id="spurious-demo">
+  <div class="demo-title">🧪 实验：独立随机游走之间的"相关性"</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">这一对随机游走（已标准化）</div>
+    <div class="chart" data-h="220"></div>
+    <div class="chart-cap">重复 400 次：相关系数的分布</div>
+    <div class="chart" data-h="230"></div>
+    <div class="readout"></div>
+    <p class="hint">多点几次"换一对"。独立白噪声的相关系数老老实实挤在 0 附近；独立随机游走的相关系数却铺满了 −1 到 1——<strong>随便抓两条有趋势的序列，都很可能"强相关"</strong>。解药是先差分再算相关：差分后的相关系数立刻回到 0 附近。分析"指标 A 是否驱动指标 B"时，请看<strong>变化量</strong>之间的相关，而不是水平之间的相关。</p>
+  </div>
+</div>
+</section>
+
+<section id="diff">
+<h2>差分与变换：把序列变平稳</h2>
+<p>三种工具，各管一种不平稳：</p>
+<div class="tw"><table>
+<thead><tr><th>问题</th><th>工具</th><th>公式</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td>波动随水平放大</td><td><strong>取对数</strong>（或 Box-Cox）</td><td>$y'_t = \log y_t$</td><td>把"乘法"变"加法"，稳定方差</td></tr>
+<tr><td>趋势</td><td><strong>一阶差分</strong></td><td>$\nabla y_t = y_t - y_{t-1}$</td><td>从"水平"变成"变化量"</td></tr>
+<tr><td>季节</td><td><strong>季节差分</strong></td><td>$\nabla_m y_t = y_t - y_{t-m}$</td><td>和上个周期同一位置比（就是"同比变化量"）</td></tr>
+</tbody></table></div>
+<p>取对数再做一阶差分有一个漂亮的解释：$\log y_t - \log y_{t-1} \approx$ <strong>增长率</strong>。所以"对数差分"建模，实际上是在对增长率建模。</p>
+<div class="demo" id="diff-demo">
+  <div class="demo-title">🧪 实验：差分工作台</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">变换后的序列</div>
+    <div class="chart" data-h="230"></div>
+    <div class="chart-cap">变换后序列的自相关（虚线内 = 与 0 无显著差别）</div>
+    <div class="chart" data-h="200"></div>
+    <div class="readout"></div>
+    <p class="hint">以"月度销售额"为例按顺序操作：① 什么都不做——趋势明显，ACF 缓慢衰减，ADF 判定不平稳；② 勾选取对数——喇叭口消失；③ 一阶差分——趋势没了，但 ACF 在 12、24 处有尖峰，季节还在；④ 再做季节差分——趋势和季节的尖峰都没了，只在滞后 1 和滞后 12 附近留下一两根负柱子。这不是没处理干净，而是差分留下的正常痕迹，第 07 章 ARIMA 里的 MA 项专门用来刻画它。然后把一阶差分调到 2 次：滞后 1 的自相关变得很负、标准差反而变大——这是<strong>差分过头</strong>的信号。</p>
+  </div>
+</div>
+<div class="callout warn">
+  <div class="hd">⚠️ 差分不是越多越好</div>
+  <ul>
+    <li>绝大多数业务序列：一阶差分 0–1 次、季节差分 0–1 次就够了，合计很少超过 2 次。</li>
+    <li>差分过头的表现：滞后 1 自相关接近 −0.5，方差比差分前更大。</li>
+    <li>差分会损失"水平"信息；预测完要记得<strong>逆变换</strong>回原尺度（累加回去、再取指数）。</li>
+    <li>数据里有 0 或负值时不能直接取对数：可以用 $\log(1+y)$，或改用 Box-Cox / 不做变换。</li>
+  </ul>
+</div>
+</section>
+
+<section id="adf">
+<h2>平稳性检验：ADF 与 KPSS</h2>
+<p>肉眼判断之外，可以用统计检验给一个更客观的结论。最常用的两个检验的<strong>原假设正好相反</strong>，搭配使用最稳妥：</p>
+<div class="tw"><table>
+<thead><tr><th>检验</th><th>原假设 $H_0$</th><th>怎么读</th></tr></thead>
+<tbody>
+<tr><td><strong>ADF</strong>（单位根检验）</td><td>有单位根 → <strong>不平稳</strong></td><td>统计量比临界值更负（或 p &lt; 0.05）→ 拒绝 $H_0$ → 平稳</td></tr>
+<tr><td><strong>KPSS</strong></td><td><strong>平稳</strong></td><td>p &lt; 0.05 → 拒绝 $H_0$ → 不平稳</td></tr>
+</tbody></table></div>
+<p>ADF 的做法是做一个回归：$\Delta y_t = \alpha + \gamma\, y_{t-1} + \sum_i \delta_i \Delta y_{t-i} + \varepsilon_t$。如果序列会"被拉回均值"，那么当前值越高、下一步的变化就越倾向于负，$\gamma$ 显著小于 0；随机游走则 $\gamma = 0$。检验统计量就是 $\gamma$ 除以它的标准误（上面实验里显示的就是它，5% 临界值约为 −2.86）。</p>
+<div class="tw"><table>
+<thead><tr><th>ADF</th><th>KPSS</th><th>结论</th><th>怎么办</th></tr></thead>
+<tbody>
+<tr><td>平稳</td><td>平稳</td><td>平稳</td><td>直接建模</td></tr>
+<tr><td>不平稳</td><td>不平稳</td><td>有单位根</td><td>差分</td></tr>
+<tr><td>不平稳</td><td>平稳</td><td>数据太短或趋势平稳，证据不足</td><td>结合图形判断，通常差分</td></tr>
+<tr><td>平稳</td><td>不平稳</td><td>差分平稳</td><td>差分</td></tr>
+</tbody></table></div>
+<div class="callout warn">
+  <div class="hd">⚠️ 检验的三个盲区</div>
+  <ul>
+    <li><strong>ADF 看不见季节。</strong>一条有强季节但没有趋势的序列会被判"平稳"，仍需结合 ACF 判断是否做季节差分。</li>
+    <li><strong>结构突变会骗过检验。</strong>有一个水平台阶的平稳序列常被误判为不平稳（第 03 章的口径突变）。</li>
+    <li><strong>样本量很大时，一点点偏离也"显著"。</strong>检验是参考，不是判决；最终以回测效果为准。</li>
+  </ul>
+</div>
+</section>
+
+<section id="acf">
+<h2>ACF 与 PACF：读出序列的记忆结构</h2>
+<p><strong>自相关函数 ACF</strong> 回答："今天和 $k$ 天前有多像？"——就是第 02 章滞后图里的相关系数，对每个 $k$ 都算一遍：</p>
+$$r_k = \frac{\sum_{t=k+1}^{n}(y_t-\bar y)(y_{t-k}-\bar y)}{\sum_{t=1}^{n}(y_t-\bar y)^2}$$
+<p><strong>偏自相关函数 PACF</strong> 回答一个更精细的问题："<strong>排除掉中间那几天的传话之后</strong>，今天和 $k$ 天前还有没有直接关系？"</p>
+<p>举个例子：如果今天只直接受昨天影响（AR(1)，$\phi=0.8$），那今天和前天仍然相关（$0.8^2=0.64$）——但那是通过昨天"传话"过来的。ACF 把这种间接相关也算进去，所以缓慢衰减；PACF 把它剔除，所以只有滞后 1 那一根柱子。</p>
+<div class="demo" id="acf-demo">
+  <div class="demo-title">🧪 实验：不同序列的 ACF / PACF 指纹</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="190"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">ACF（自相关）</div><div class="chart" data-h="210"></div></div>
+      <div><div class="chart-cap">PACF（偏自相关）</div><div class="chart" data-h="210"></div></div>
+    </div>
+    <div class="readout"></div>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>在 ACF 图上看到</th><th>说明</th><th>下一步</th></tr></thead>
+<tbody>
+<tr><td>所有柱子都在虚线带内</td><td>白噪声，没有可利用的线性规律</td><td>到此为止（如果这是残差，说明模型合格）</td></tr>
+<tr><td>从接近 1 开始，非常缓慢地衰减</td><td>有趋势 / 不平稳</td><td>差分</td></tr>
+<tr><td>在 $m, 2m, 3m$ 处有尖峰</td><td>周期为 $m$ 的季节</td><td>季节差分或季节模型</td></tr>
+<tr><td>较快地衰减到 0（几阶之内）</td><td>平稳、有短期记忆</td><td>用 ARMA 建模，阶数看 ACF/PACF 的截尾位置（第 07 章）</td></tr>
+</tbody></table></div>
+<p class="small muted">虚线是 $\pm 1.96/\sqrt{n}$：如果序列真的是白噪声，约 95% 的柱子会落在带内。所以 20 根柱子里偶尔有 1 根稍微出界是正常的，不必过度解读。</p>
+<details class="code"><summary>Python 参考代码：检验、差分、ACF / PACF</summary>
+<pre><code>import numpy as np
+from statsmodels.tsa.stattools import adfuller, kpss
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+
+def check_stationarity(x, name=""):
+    x = x.dropna()
+    adf_stat, adf_p, *_ = adfuller(x, autolag="AIC")
+    kpss_stat, kpss_p, *_ = kpss(x, regression="c", nlags="auto")
+    print(f"{name:12s} ADF={adf_stat:6.2f} (p={adf_p:.3f})  KPSS p={kpss_p:.3f}  "
+          f"=&gt; {'平稳' if adf_p &lt; 0.05 and kpss_p &gt; 0.05 else '不平稳/证据不足'}")
+
+ly = np.log(y)                       # 稳定方差
+d1 = ly.diff()                       # 一阶差分 ≈ 增长率
+d1s = ly.diff().diff(12)             # 再做季节差分（m=12）
+
+for name, x in [("原始", y), ("对数", ly), ("对数差分", d1), ("再季节差分", d1s)]:
+    check_stationarity(x, name)
+
+plot_acf(d1s.dropna(), lags=36)      # 看季节尖峰是否消失
+plot_pacf(d1s.dropna(), lags=36, method="ywm")
+
+# 自动判断需要几次差分
+from pmdarima.arima import ndiffs, nsdiffs
+print(ndiffs(ly, test="adf"), nsdiffs(ly, m=12))</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>平稳 = 均值、方差、自相关结构不随时间变；预测模型在平稳的部分上才学得到可靠规律。</li>
+  <li>白噪声不可预测；随机游走的最佳预测是当前值；平稳 AR 会向均值回复。</li>
+  <li>两条不平稳的序列很容易出现虚假的高相关——先差分再谈相关。</li>
+  <li>取对数稳方差，一阶差分去趋势，季节差分去季节；差分过头会让方差变大、滞后 1 自相关变得很负。</li>
+  <li>ADF 的原假设是"不平稳"，KPSS 的原假设是"平稳"；两个都看不见季节。</li>
+  <li>ACF 看总相关，PACF 看排除中间传话后的直接相关；两张图合起来是序列的"指纹"。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+
+// ACF / PACF 柱状图的统一画法
+function corrBars(vals, n, name, slot) {
+  const band = 1.96 / Math.sqrt(n), p = Site.pal();
+  const ser = S.bar(name, vals.slice(1).map(v => +v.toFixed(3)), { c: slot || 0, maxW: 10 });
+  ser.markLine = S.hline([band, -band], { c: p.muted });
+  return { xAxis: { data: vals.slice(1).map((_, i) => i + 1), name: '滞后', nameLocation: 'middle', nameGap: 22 }, yAxis: { min: -1, max: 1, scale: false }, legend: false, series: [ser] };
+}
+
+/* ---------- AR(1) 模拟器 ---------- */
+Site.demo('sim', {
+  controls: [
+    { k: 'phi', label: 'φ（对昨天的依赖）', min: 0, max: 1.04, step: 0.02, value: 0.5, fmt: v => v.toFixed(2) },
+    { k: 'drift', label: '漂移 c（每步固定增量）', min: 0, max: 0.5, step: 0.05, value: 0, fmt: v => v.toFixed(2) },
+    { k: 'paths', label: '同时画几条', type: 'seg', options: [[1, '1 条'], [5, '5 条'], [30, '30 条']], value: 5 },
+    { act: 'regen', label: '🎲 换一组', run: s => { s.seed = (s.seed || 1) + 1; } },
+  ],
+  render(s, d) {
+    const n = 300, P = s.paths, p = Site.pal(), series = [], at100 = [], at300 = [];
+    for (let k = 0; k < P; k++) {
+      const r = TS.rng((s.seed || 1) * 1000 + k), arr = []; let y = 0;
+      for (let t = 0; t < n; t++) { y = s.drift + s.phi * y + r.n(); arr.push(+y.toFixed(2)); }
+      at100.push(arr[99]); at300.push(arr[n - 1]);
+      series.push(S.line('路径 ' + (k + 1), arr, { c: p.s[0], w: k === 0 ? 1.8 : 1, op: k === 0 ? 1 : (P > 5 ? 0.22 : 0.4) }));
+    }
+    d.chart(0, { xAxis: { data: Array.from({ length: n }, (_, i) => i + 1), name: '时间步', nameLocation: 'middle', nameGap: 22 }, yAxis: {}, legend: false, tooltip: false, series });
+    const ph = s.phi, kind = ph === 0 ? '白噪声' : ph < 1 ? '平稳 AR(1)' : ph === 1 ? (s.drift ? '带漂移的随机游走' : '随机游走') : '爆炸过程';
+    const half = ph > 0 && ph < 1 ? Math.log(0.5) / Math.log(ph) : null;
+    const tiles = [
+      ['过程类型', kind, ph < 1 ? '平稳' : '不平稳', ph < 1 ? 'good' : 'bad'],
+      ['理论标准差', ph < 1 ? (1 / Math.sqrt(1 - ph * ph)).toFixed(2) : '随时间增大', ph < 1 ? '固定不变' : (ph === 1 ? '第 t 步为 √t' : '指数增长')],
+      ['冲击的半衰期', ph === 0 ? '0 步' : half != null ? half.toFixed(1) + ' 步' : '永不衰减', '一次冲击的影响减半所需的时间'],
+    ];
+    if (P > 1) tiles.push(['各路径的离散度：第 100 步 → 第 300 步', TS.std(at100).toFixed(1) + ' → ' + TS.std(at300).toFixed(1), ph < 1 ? '理论上不变（路径少时有抽样波动）' : '越来越散']);
+    d.out(Site.tiles(tiles));
+  },
+});
+
+/* ---------- 伪回归 ---------- */
+Site.demo('spurious-demo', {
+  controls: [{ act: 'regen', label: '🎲 换一对', primary: true, run: s => { s.seed = (s.seed || 3) + 1; } }],
+  setup(s) { // 蒙特卡洛：400 对独立随机游走、400 对独立白噪声
+    const r = TS.rng(2024), n = 200, rw = [], wn = [];
+    for (let k = 0; k < 400; k++) {
+      const a = Array.from({ length: n }, () => r.n()), b = Array.from({ length: n }, () => r.n());
+      wn.push(TS.corr(a, b)); rw.push(TS.corr(TS.cumsum(a), TS.cumsum(b)));
+    }
+    s.mc = { rw, wn };
+  },
+  render(s, d) {
+    const r = TS.rng(500 + (s.seed || 3)), n = 200, p = Site.pal();
+    const ea = Array.from({ length: n }, () => r.n()), eb = Array.from({ length: n }, () => r.n()), a = TS.cumsum(ea), b = TS.cumsum(eb);
+    const z = x => { const m = TS.mean(x), sd = TS.std(x); return x.map(v => +((v - m) / sd).toFixed(2)); };
+    d.chart(0, { xAxis: { data: a.map((_, i) => i + 1) }, yAxis: {}, series: [S.line('随机游走 A', z(a), { c: 0 }), S.line('随机游走 B（与 A 完全独立）', z(b), { c: 1 })] });
+    const bins = Array.from({ length: 20 }, (_, i) => -0.95 + i * 0.1), hist = arr => { const h = new Array(20).fill(0); arr.forEach(v => { h[Math.min(19, Math.max(0, Math.floor((v + 1) * 10)))]++; }); return h.map(c => +(c / arr.length * 100).toFixed(1)); };
+    d.chart(1, {
+      xAxis: { data: bins.map(v => v.toFixed(2)), name: '相关系数', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: '占比 %', scale: false },
+      series: [S.bar('两条独立的白噪声', hist(s.mc.wn), { c: 2, maxW: 14 }), S.bar('两条独立的随机游走', hist(s.mc.rw), { c: 1, maxW: 14 })],
+    });
+    const rr = TS.corr(a, b), share = arr => arr.filter(v => Math.abs(v) > 0.5).length / arr.length;
+    d.out(Site.tiles([
+      ['这一对的相关系数', rr.toFixed(2), Math.abs(rr) > 0.5 ? '"强相关"——但它们毫无关系' : '这次碰巧不高，再换一对', Math.abs(rr) > 0.5 ? 'bad' : ''],
+      ['差分后再算', TS.corr(ea, eb).toFixed(2), '回到 0 附近', 'good'],
+      ['随机游走对中 |r| > 0.5 的比例', Site.pct(share(s.mc.rw), 0), '虚假强相关有多常见', 'bad'],
+      ['白噪声对中 |r| > 0.5 的比例', Site.pct(share(s.mc.wn), 0)],
+    ]));
+  },
+});
+
+/* ---------- 差分工作台 ---------- */
+Site.demo('diff-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'select', options: [['monthly', '月度销售额（周期 12）'], ['retail', '电商日销量（周期 7）'], ['dau', 'App 日活（周期 7）'], ['stock', '股价（随机游走）']] },
+    { k: 'log', label: '取对数', type: 'check', value: false },
+    { k: 'd', label: '一阶差分次数', type: 'seg', options: [[0, '0'], [1, '1'], [2, '2']] },
+    { k: 'D', label: '季节差分', type: 'seg', options: [[0, '不做'], [1, '做 1 次']] },
+  ],
+  render(s, d) {
+    const ds = TS.data[s.ds](), m = ds.period;
+    let x = s.log ? ds.y.map(Math.log) : ds.y.slice(), dates = ds.dates.slice();
+    if (s.D) { x = TS.diff(x, m); dates = dates.slice(m); }
+    for (let i = 0; i < s.d; i++) { x = TS.diff(x, 1); dates = dates.slice(1); }
+    const n = x.length, K = Math.min(Math.max(3 * m, 24), 40), ac = TS.acf(x, K), adf = TS.adf(x);
+    d.chart(0, { xAxis: { data: dates }, yAxis: {}, legend: false, series: [S.line('变换后', x.map(v => +v.toFixed(4)), { c: 0, w: 1.3 })] });
+    d.chart(1, corrBars(ac, n, '自相关', 0));
+    const half = n >> 1, fan = TS.std(x.slice(half)) / TS.std(x.slice(0, half)), sea = ac[m], over = ac[1] < -0.4;
+    const hasSea = sea > 0.4 && s.ds !== 'stock';
+    const verdict = !adf.stationary ? ['不平稳：还有趋势', 'bad'] : over ? ['差分过头了', 'bad'] : hasSea ? ['没有单位根，但还有季节（ADF 看不见季节）', 'bad'] : ['基本平稳', 'good'];
+    d.out(Site.tiles([
+      ['ADF 统计量', adf.stat.toFixed(2), adf.stationary ? '< −2.86，拒绝"不平稳"' : '> −2.86，不能拒绝"不平稳"', adf.stationary ? 'good' : 'bad'],
+      ['后半段 ÷ 前半段的波动', fan.toFixed(2), fan > 1.5 || fan < 0.67 ? '方差不稳定 → 试试取对数' : '方差稳定', fan > 1.5 || fan < 0.67 ? 'bad' : 'good'],
+      ['滞后 ' + m + ' 的自相关', sea.toFixed(2), !adf.stationary ? '趋势未除时偏高，先去趋势再看' : hasSea ? '季节明显' : sea < -0.25 ? '负值：季节差分留下的正常痕迹' : '季节不明显'],
+      ['滞后 1 的自相关', ac[1].toFixed(2), over ? '很负 → 差分过头' : ''],
+      ['序列标准差', TS.std(x), '差分过头时会变大'],
+      ['综合判断', verdict[0], '', verdict[1]],
+    ]));
+  },
+});
+
+/* ---------- ACF / PACF 指纹 ---------- */
+const PRINTS = {
+  wn: ['白噪声', () => { const r = TS.rng(9); return Array.from({ length: 400 }, () => r.n()); }, 'ACF、PACF 的柱子全部落在虚线带内：没有任何线性规律可用。模型残差应该长这样。'],
+  ar: ['AR(1)，φ = 0.8', () => TS.simArma(400, [0.8], [], TS.rng(10)), 'ACF 按 0.8、0.64、0.51… 逐步衰减（<strong>拖尾</strong>）；PACF 只有滞后 1 一根高柱，之后归零（<strong>截尾</strong>）。这是 AR 过程的指纹。'],
+  ma: ['MA(1)，θ = 0.8', () => TS.simArma(400, [], [0.8], TS.rng(11)), '反过来：ACF 只有滞后 1 一根高柱后截尾；PACF 正负交替地拖尾。这是 MA 过程的指纹（第 07 章细讲）。'],
+  rw: ['随机游走', () => { const r = TS.rng(12); return TS.cumsum(Array.from({ length: 400 }, () => r.n())); }, 'ACF 从接近 1 开始极其缓慢地下降；PACF 滞后 1 接近 1。这是"不平稳、需要差分"的指纹。'],
+  raw: ['电商销量（原始）', () => TS.data.retail().y.slice(-400), '趋势让 ACF 整体偏高且衰减缓慢，同时在 7、14、21… 处有凸起：趋势和周季节叠加在一起。'],
+  dif: ['电商销量（对数 + 季节差分）', () => TS.diff(TS.data.retail().y.slice(-407).map(Math.log), 7), '做完对数和季节差分后，ACF 很快衰减；滞后 7 处是明显的负值——这是季节差分留下的典型痕迹，提示可以用一个季节 MA 项来刻画（第 07 章）。'],
+};
+Site.demo('acf-demo', {
+  controls: [{ k: 'kind', label: '选择一条序列', type: 'select', options: Object.keys(PRINTS).map(k => [k, PRINTS[k][0]]), value: 'ar' }],
+  render(s, d) {
+    const cfg = PRINTS[s.kind], x = cfg[1](), n = x.length, K = 24;
+    d.chart(0, { xAxis: { data: x.map((_, i) => i + 1) }, yAxis: {}, legend: false, tooltip: false, series: [S.line(cfg[0], x.map(v => +v.toFixed(3)), { c: 0, w: 1.2 })] });
+    d.chart(1, corrBars(TS.acf(x, K), n, 'ACF', 0));
+    d.chart(2, corrBars(TS.pacf(x, K), n, 'PACF', 6));
+    d.out(`<div class="callout tip" style="margin:0"><strong>怎么读：</strong>${cfg[2]}</div>`);
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '下面哪条序列最接近"平稳"？', opts: ['逐年增长的公司营收', '某只股票的每日收盘价', '恒温机房每分钟的温度读数（围绕设定值小幅波动）', '夏高冬低的月度用电量'], ans: 2, alt: '', why: '恒温机房的温度围绕固定水平、以固定幅度波动。营收有趋势，股价是随机游走，用电量有季节——都不平稳。' },
+  { q: '发现"公司员工人数"和"App 日活"过去三年的相关系数是 0.93。最稳妥的解读是？', opts: ['多招人能提升日活', '日活增长导致了招聘', '两者都有增长趋势，水平值的高相关可能是虚假的；应看变化量之间的相关', '相关系数算错了'], ans: 2, why: '两条有趋势的序列几乎必然高度相关（伪回归）。应先差分或去趋势，再看两者的变化是否同步。' },
+  { q: '对一条月度序列做了一阶差分后，ACF 在滞后 12、24、36 处仍有很高的尖峰。下一步应该？', opts: ['再做一次一阶差分', '做季节差分（滞后 12）', '取对数', '什么都不用做，已经平稳了'], ans: 1, why: '周期整数倍处的尖峰说明季节还在。一阶差分只去趋势，去季节要用季节差分 y_t − y_{t−12}。' },
+  { q: 'AR(1) 过程的 ACF 逐渐衰减，而 PACF 只在滞后 1 处显著。为什么 PACF 在滞后 2 处接近 0？', opts: ['因为数据量不够', '因为今天和前天的相关完全是通过昨天间接传递的，剔除昨天的影响后就没有直接关系了', '因为 PACF 只能算到滞后 1', '因为 AR(1) 是白噪声'], ans: 1, why: 'PACF 度量的是"排除中间各期影响后的直接相关"。AR(1) 里只有相邻一期有直接作用，更远的相关都是传话传过去的。' },
+  { q: 'ADF 检验的统计量为 −1.2（5% 临界值 −2.86）。结论是？', opts: ['拒绝原假设，序列平稳', '不能拒绝原假设，没有证据表明序列平稳，通常需要差分', '序列是白噪声', '序列有季节性'], ans: 1, why: 'ADF 的原假设是"有单位根（不平稳）"。统计量不够负，就不能拒绝它。' },
+]);
+</script>
+</body>
+</html>

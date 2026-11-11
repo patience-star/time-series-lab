@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>03 脏数据诊断与清洗 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="03">
+<main>
+<p class="lead">教科书里的数据是干净的，业务库里拉出来的不是。某天整行没有、同一天报了两次、刷单造成的尖峰、缺货把销量压成 0、指标口径中途改了……<strong>这些问题对预测精度的影响，往往比换一个更高级的模型大得多</strong>。这一章逐类讲清楚：它们从哪来、长什么样、不处理会怎样、该怎么治。</p>
+
+<section id="types">
+<h2>十类常见的脏数据</h2>
+<div class="tw"><table>
+<thead><tr><th>类型</th><th>业务上怎么产生的</th><th>不处理的后果</th><th>处理要点</th></tr></thead>
+<tbody>
+<tr><td><strong>缺行</strong></td><td>当天没有交易/没有上报，明细表里根本没有这一天</td><td>时间轴错位：模型以为"昨天"其实是三天前</td><td>补全日期索引</td></tr>
+<tr><td><strong>重复行</strong></td><td>重复上报、任务重跑、修正记录追加</td><td>求和时翻倍；取哪条结果不同</td><td>按业务规则去重/聚合</td></tr>
+<tr><td><strong>空值</strong></td><td>埋点丢失、系统宕机、接口超时</td><td>被当成 0 → 均线塌陷、模型学到假的"暴跌"</td><td>先判断是"没有数据"还是"真的是 0"，再填充</td></tr>
+<tr><td><strong>异常尖峰</strong></td><td>刷单、测试订单、大客户一次性团购、埋点重复触发</td><td>拉高均值和季节系数，预测偏高</td><td>稳健方法检测，置空后填充</td></tr>
+<tr><td><strong>负值</strong></td><td>退货冲销记在了退货当天</td><td>对数变换报错；乘法模型崩溃</td><td>冲回原始订单日，或置空</td></tr>
+<tr><td><strong>卡死</strong></td><td>传感器故障、接口返回缓存值</td><td>模型学到"波动消失"；真实变化被掩盖</td><td>检测连续相同值</td></tr>
+<tr><td><strong>缺货截断</strong></td><td>卖断货了，销量被库存上限压住</td><td>把"没货"当成"没需求"，越缺越少订</td><td>用库存标记识别，还原真实需求</td></tr>
+<tr><td><strong>口径突变</strong></td><td>指标定义调整、单位变化、渠道并入/剥离、系统迁移</td><td>新老数据不可比；趋势和同比全错</td><td>检测突变点，对齐口径</td></tr>
+<tr><td><strong>尾部未到齐</strong></td><td>最近几天的订单还没结算完、数据还在回填</td><td>最新几天"假下跌"，带偏预测</td><td>训练时截掉未成熟的尾部</td></tr>
+<tr><td><strong>事件</strong>（不是脏数据！）</td><td>大促、节假日、发版</td><td>被当异常删掉 → 模型永远预测不出大促</td><td>保留，并做成特征</td></tr>
+</tbody></table></div>
+<p>下面这个"诊所"把这些问题一个个注入到干净的销量数据里。因为我们手里有真值，所以可以检验：<strong>只看到脏数据的情况下，体检能发现多少问题？</strong></p>
+
+<div class="demo" id="clinic">
+  <div class="demo-title">🧪 脏数据诊所：注入问题 → 自动体检</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="330"></div>
+    <div class="readout"></div>
+    <p class="hint">灰色虚线是真值，蓝线是"拿到手的数据"。逐个勾选问题类型，看图上发生了什么、体检报告能不能抓到。注意三件事：① <strong>缺货</strong>只看销量几乎无法确认，必须有库存数据；② "疑似异常点"里总有一批是促销和节假日——那是事件，不是异常；③ 口径突变一旦发生，后面所有的点都"低一截"，但每个点单独看都不异常。</p>
+  </div>
+</div>
+</section>
+
+<section id="align">
+<h2>第一步永远是：对齐时间轴</h2>
+<p>数据库里的明细表是"有事才记一行"，时间序列模型却默认"每个时间点恰好一个值"。所以第一步不是填充也不是去异常，而是把原始记录变成<strong>规整的序列</strong>：每个日期恰好一行，没有记录的日期明确标成空。</p>
+<div class="callout warn">
+  <div class="hd">⚠️ 三种"没有"要分清</div>
+  <ul>
+    <li><strong>行不存在</strong>：如果业务上"没记录 = 没发生"（比如某 SKU 当天没卖出），应补 <code>0</code>；如果是采集失败，应补 <code>NaN</code>。</li>
+    <li><strong>值为 NaN</strong>：不知道是多少。<strong>绝不能直接当 0</strong>。</li>
+    <li><strong>值为 0</strong>：真的是零。但要追问一句——是没需求，还是没货/没营业？</li>
+  </ul>
+</div>
+<div class="demo" id="align-demo">
+  <div class="demo-title">🧪 实验：从原始记录到规整序列</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">原始记录（数据库里的样子）</div><div class="readout"></div></div>
+      <div><div class="chart-cap">对齐之后</div><div class="readout"></div></div>
+    </div>
+    <p class="hint">重复行怎么合并没有标准答案，要问业务：重复上报 → 保留一条；追加的修正记录 → 保留最后一条；分批到达的流水 → 求和。选错规则，3 月 2 日的值可以是 120、125 或 245。</p>
+  </div>
+</div>
+</section>
+
+<section id="missing">
+<h2>缺失值：怎么填</h2>
+<p>时间轴对齐之后，序列里会有一些 NaN。大多数模型不接受缺失，需要填充。填充方法的好坏取决于<strong>缺了多长</strong>和<strong>数据有没有季节</strong>：</p>
+<div class="demo" id="impute-demo">
+  <div class="demo-title">🧪 实验：五种填充方法对比（和真值比谁更准）</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">连续缺 9 天时：前向填充是一条平线、线性插值是一条斜线，都丢掉了周内节奏；季节填充（局部水平 × 该星期几的季节指数）把形状补了回来。"当 0 处理"的误差是其他方法的十倍以上——这是实际项目里最常见、代价最大的错误（<code>fillna(0)</code> 或 <code>SUM</code> 时 NULL 被忽略）。</p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>情况</th><th>推荐做法</th></tr></thead>
+<tbody>
+<tr><td>零星缺 1–2 个点，季节不强</td><td>线性插值</td></tr>
+<tr><td>有明显季节，缺口短于 2–3 个周期</td><td>季节填充（同相位估计），或 STL 分解后在趋势上插值再加回季节</td></tr>
+<tr><td>缺口很长（数周以上）</td><td>不要硬填。把序列在缺口处截断只用后半段，或用另一条相关序列回归估计</td></tr>
+<tr><td>实时场景</td><td>只能用过去的信息：前向填充或"上周同一天"，不能用插值（插值用到了未来）</td></tr>
+<tr><td>任何情况</td><td>保留一列 <code>was_missing</code> 标记，让下游知道这个值是估计的</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="outlier">
+<h2>异常值：先检测，再问"是异常还是事件"</h2>
+<p>异常检测的思路都是同一句话：<strong>先估计"正常情况下应该是多少"，再看实际值偏离了多远</strong>。方法之间的区别只在于"正常"怎么估计、"多远"怎么度量：</p>
+<div class="tw"><table>
+<thead><tr><th>方法</th><th>"正常"的估计</th><th>"多远"的度量</th><th>问题</th></tr></thead>
+<tbody>
+<tr><td>全局 3σ</td><td>全体均值</td><td>全体标准差 $\sigma$</td><td>没考虑趋势和季节；$\sigma$ 本身被异常值撑大</td></tr>
+<tr><td>箱线图 IQR</td><td>四分位数 $Q_1, Q_3$</td><td>$\text{IQR}=Q_3-Q_1$</td><td>比 3σ 稳健，但同样没考虑趋势和季节</td></tr>
+<tr><td>Hampel 滤波</td><td>滚动窗口的<strong>中位数</strong></td><td>滚动 <strong>MAD</strong>（绝对偏差的中位数）</td><td>跟得上趋势；窗口内若有季节，带子会偏宽</td></tr>
+<tr><td>残差法</td><td>趋势 + 季节（稳健分解）</td><td>残差的 MAD</td><td>最贴合时序特点；实际项目首选</td></tr>
+</tbody></table></div>
+<p>为什么用中位数和 MAD 而不用均值和标准差？因为均值和标准差会被异常值本身拉偏——用被污染的尺子去量污染，量不准。$1.4826 \times \text{MAD}$ 在正态分布下约等于标准差，可以直接替换。</p>
+
+<div class="demo" id="outlier-demo">
+  <div class="demo-title">🧪 实验：异常检测器</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="330"></div>
+    <div class="readout"></div>
+    <p class="hint">数据里注入了 6 个刷单尖峰（比正常多 45%–80%）和 4 个故障造成的下跌（只剩正常的 40%–60%）。它们单看数值并不出格——周末和促销日本来就这么高。先用"全局 3σ"：抓到的主要是 618 和双 11，注入的异常大多漏掉。换"残差法"：注入的异常基本全中，但<strong>大促和小促也被标了出来</strong>。把阈值调高可以少报一些事件，但也会开始漏真异常——光靠调阈值分不开它们，必须引入业务日历。</p>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 异常 vs 事件：处理方式完全相反</div>
+  <div class="tw" style="margin:8px 0 0"><table>
+  <thead><tr><th></th><th>异常（刷单、故障、测试数据）</th><th>事件（大促、节假日、发版）</th></tr></thead>
+  <tbody>
+  <tr><td>会再次发生吗</td><td>不会，或不可预知</td><td>会，而且日期已知</td></tr>
+  <tr><td>怎么处理</td><td>置空 → 填充（或缩尾到判定带边界）</td><td><strong>保留原值</strong>，加事件特征（是否大促、距离春节几天）</td></tr>
+  <tr><td>误处理的后果</td><td>留着 → 预测偏高、季节系数失真</td><td>删掉 → 模型永远预测不出大促，备货严重不足</td></tr>
+  </tbody></table></div>
+  <p>实操做法：维护一张<strong>业务日历表</strong>（促销排期、节假日、发版、已知故障），检测到的异常点先和日历对一遍，对得上的是事件，对不上的才进入清洗。</p>
+</div>
+</section>
+
+<section id="stockout">
+<h2>缺货截断：销量 ≠ 需求</h2>
+<p>我们想预测的是<strong>需求</strong>，但数据库里记录的是<strong>销量</strong>。只要有货，两者相等；一旦缺货，销量被库存上限"截断"，记录下来的数字低于真实需求。这在统计上叫<strong>删失数据</strong>（censored data）。</p>
+<p>可怕的是它会自我强化：缺货 → 销量低 → 模型以为需求低 → 订得更少 → 更容易缺货。</p>
+<div class="demo" id="stockout-demo">
+  <div class="demo-title">🧪 实验：缺货如何带偏预测</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="320"></div>
+    <div class="readout"></div>
+    <p class="hint">阴影区是缺货期。把"缺货结束距今"调到 0–3 天：用原始销量训练的预测（橙色）明显低于真实需求；还原后（粉色）回到正常水平。再把它调到 14 天：模型已经开始"忘记"那段缺货，影响变小——<strong>离现在越近的脏数据，危害越大</strong>。</p>
+  </div>
+</div>
+<div class="callout tip">
+  <div class="hd">💡 怎么识别和还原</div>
+  <ul>
+    <li><strong>识别</strong>：最可靠的是库存快照（期末库存 = 0）或上下架状态；没有的话，用"销量骤降到接近 0 且前后正常、同期其他门店/SKU 正常"作为线索。</li>
+    <li><strong>还原</strong>：把缺货日当作缺失，用季节填充或模型预测值替代；且还原值不应低于实际销量。</li>
+    <li><strong>部分缺货</strong>（下午才卖完）更隐蔽：有小时级数据时，可用当天缺货前的销售速度外推全天。</li>
+    <li>同理，<strong>限购、限流、闭店</strong>也会造成截断，处理方式相同。</li>
+  </ul>
+</div>
+</section>
+
+<section id="shift">
+<h2>口径突变：新老数据不可比</h2>
+<p>某一天起，指标的统计方式变了：日活从"启动 App"改成"停留超过 10 秒"；销售额从含税改成不含税；某个渠道的数据被剥离出去。曲线会出现一个<strong>台阶</strong>——每个点单独看都不异常，但前后两段不是一个东西。</p>
+<div class="demo" id="shift-demo">
+  <div class="demo-title">🧪 实验：检测并对齐口径突变</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">日活数据（某天起去重规则变严，数值下降）</div>
+    <div class="chart" data-h="250"></div>
+    <div class="chart-cap">突变扫描曲线：每个位置"右侧 8 周中位数 − 左侧 8 周中位数"，以稳健标准差为单位</div>
+    <div class="chart" data-h="170"></div>
+    <div class="readout"></div>
+    <p class="hint">扫描曲线在口径变更处形成一个很深的谷，远超 ±3.5 的阈值线。两处发版带来的小台阶也有反应，但没过阈值——<strong>那是真实的业务增长，不该抹平</strong>。勾选"对齐口径"：把突变前的数据乘以估计的比例，换算到新口径。估计的比例与真实比例有一点偏差，这很正常，所以正式场合应以"双跑期"的对比数据为准。</p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>处理方式</th><th>适用情况</th></tr></thead>
+<tbody>
+<tr><td><strong>双跑校准</strong></td><td>最可靠：切换前后新老口径并行统计一段时间，直接得到换算比例。<strong>要在切换前向数据团队争取</strong></td></tr>
+<tr><td>按比例/差值对齐</td><td>没有双跑期时，用突变点两侧的水平估计比例（上面实验的做法）</td></tr>
+<tr><td>加哑变量</td><td>回归/机器学习模型里加一列"是否新口径"，让模型自己学出台阶高度</td></tr>
+<tr><td>只用新口径数据</td><td>新口径数据已足够长（覆盖 2 个以上完整季节周期）时最干净</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="tail">
+<h2>尾部未到齐，以及其他几个坑</h2>
+<h3>数据还没"熟"</h3>
+<p>很多指标不是当天就定型的：订单会取消和退款、离线任务 T+1 甚至 T+3 才跑完、埋点数据延迟上报。于是最近几天的数字<strong>系统性偏低</strong>，而它们恰恰是模型最看重的"最新信息"。</p>
+<div class="demo" id="tail-demo">
+  <div class="demo-title">🧪 实验：最后 3 天没到齐，会发生什么</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">不处理时，"和上周同一天一样"的朴素预测会把这 3 天的假下跌原样复制到未来。解决办法简单粗暴：<strong>训练时截掉还没成熟的尾部</strong>，多预测几步补上。成熟期多长要看业务（对比"当天看到的值"和"一周后再看的值"就能量出来）。</p>
+  </div>
+</div>
+
+<h3>节假日错位</h3>
+<p>春节、中秋按农历走，在公历上每年位置不同。模型如果只知道"几月几号"，就会把去年的春节低谷预测到今年错误的日期上。</p>
+<div class="tw"><table>
+<thead><tr><th>年份</th><th>2022</th><th>2023</th><th>2024</th><th>2025</th><th>2026</th></tr></thead>
+<tbody><tr><td>春节（正月初一）</td><td>2 月 1 日</td><td>1 月 22 日</td><td>2 月 10 日</td><td>1 月 29 日</td><td>2 月 17 日</td></tr></tbody></table></div>
+<p>正确做法是构造"相对节日的天数"特征（距春节 −7、−6、…、+7 天），让同一个相对位置跨年对齐。调休带来的"周末上班"同理：要用实际的工作日日历，而不是星期几。</p>
+
+<h3>间歇性需求</h3>
+<p>长尾商品可能一周只卖出一两件，序列里大部分是 0。这不是脏数据，但经常被错误处理：把 0 当缺失填掉、或者用 MAPE 评估（实际值为 0 时无法计算）。合适的做法是聚合到更粗的粒度（周、品类）再预测，或使用专门的方法（Croston 及其变体：分别预测"多久卖一次"和"每次卖多少"）。</p>
+
+<h3>时区与跨天</h3>
+<p>服务器用 UTC、业务用北京时间，"一天"的边界差 8 小时；夜间营业的门店把凌晨订单算到哪一天，各系统可能不一致。症状是日数据对不上、或每天固定有一个小时异常。聚合成日粒度之前先统一时区和"营业日"定义。</p>
+</section>
+
+<section id="payoff">
+<h2>清洗到底值不值：用预测误差说话</h2>
+<p>把一份数据弄脏，分别用"脏数据直接训练"和"清洗后再训练"的方式预测未来 28 天，再和真值比。第三根柱子"用真值训练"是理想上限——清洗做得好，应该接近它。</p>
+<div class="demo" id="payoff-demo">
+  <div class="demo-title">🧪 实验：同一个模型，脏数据 vs 清洗后</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">未来 28 天的预测误差 MAE（越低越好）</div>
+    <div class="chart" data-h="250"></div>
+    <div class="chart-cap">Holt-Winters 的预测：最后 8 周训练数据 + 未来 4 周</div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">脏数据集中注入在最近 180 天。全部勾选时，脏数据上的误差通常是清洗后的数倍。然后点"全部取消"，只留一种问题逐个试：<strong>"尾部未到齐"的破坏力最大</strong>，因为它直接污染模型最依赖的最后几天；其他问题的影响取决于它们离现在多近（多点几次"换一组脏数据"）。几个月前的口径突变对只看近期的模型影响不大，却会带偏用长历史拟合趋势的回归模型。偶尔脏数据的误差反而略低——那是歪打正着，换一组数据就不成立。</p>
+  </div>
+</div>
+</section>
+
+<section id="pipeline">
+<h2>清洗流水线与原则</h2>
+<p>上面实验里用的清洗流程如下。顺序是有讲究的——点击每一步查看原因。</p>
+<div id="flow"></div>
+<div class="callout key">
+  <div class="hd">五条原则</div>
+  <ol>
+    <li><strong>先诊断，再动手。</strong>每次拿到新数据先跑体检，量化每类问题有多少，而不是凭感觉 <code>dropna()</code>。</li>
+    <li><strong>不覆盖原始值。</strong>清洗结果写到新列，并保留 <code>is_imputed</code>、<code>is_outlier</code>、<code>is_stockout</code> 这样的标记列——它们本身就是有用的特征，也方便日后追溯。</li>
+    <li><strong>清洗规则不能偷看未来。</strong>如果清洗用了未来信息（居中窗口、全局分位数、插值），回测成绩会虚高；线上实时清洗只能用"截至当时"的数据。离线修历史数据可以用双侧信息，但评估时要分清。</li>
+    <li><strong>异常先对业务日历。</strong>对得上的是事件，保留并做特征；对不上的才清洗。</li>
+    <li><strong>规则留痕、可复跑。</strong>清洗逻辑写成代码而不是手工改表，每条规则记录"改了多少行、依据是什么"。</li>
+  </ol>
+</div>
+<details class="code" open><summary>Python 参考代码：一条完整的清洗流水线（pandas）</summary>
+<pre><code>import numpy as np
+import pandas as pd
+
+def clean_daily(raw: pd.DataFrame, calendar: pd.DataFrame, m: int = 7) -&gt; pd.DataFrame:
+    """raw: [date, sales, stock_end]；calendar: [date, is_event]。返回带标记列的规整日序列。"""
+    # 1) 对齐时间轴：重复行保留最后一条，补全缺失日期
+    df = (raw.sort_values("date").drop_duplicates("date", keep="last")
+             .set_index("date").asfreq("D"))
+    df["raw"] = df["sales"]                        # 原始值永远保留
+    y = df["sales"].astype(float)
+
+    # 2) 把"不可信的值"统一置空，并各自打标记
+    df["is_missing"]  = y.isna()
+    df["is_negative"] = y &lt; 0
+    run = (y != y.shift()).cumsum()                # 连续相同值分组
+    df["is_flat"]     = y.groupby(run).transform("size").ge(4) &amp; (y == y.shift())
+    df["is_stockout"] = df["stock_end"].eq(0)      # 需要库存快照
+    y[df["is_negative"] | df["is_flat"] | df["is_stockout"]] = np.nan
+
+    # 3) 截掉未成熟的尾部（成熟期按业务实测，这里假设 3 天）
+    y = y.iloc[:-3]; df = df.iloc[:-3]
+
+    # 4) 稳健异常检测：对数尺度上，(滚动中位数 + 星期中位数) 的残差超过 4 倍 MAD
+    ly = np.log(y.clip(lower=1))
+    trend = ly.rolling(4 * m + 1, center=True, min_periods=m).median()
+    seas = (ly - trend).groupby(ly.index.dayofweek).transform("median")
+    resid = ly - trend - seas
+    mad = 1.4826 * resid.abs().median()
+    is_event = calendar.set_index("date")["is_event"].reindex(df.index).fillna(False)
+    df["is_outlier"] = (resid.abs() &gt; 4 * mad) &amp; ~is_event     # 事件不算异常
+    y[df["is_outlier"]] = np.nan
+
+    # 5) 季节填充：局部水平 × 星期指数
+    level = y.rolling(4 * m + 1, center=True, min_periods=m).median()
+    index = (y / level).groupby(y.index.dayofweek).transform("median")
+    df["is_imputed"] = y.isna()
+    df["sales_clean"] = y.fillna(level * index).round()
+    return df
+
+clean = clean_daily(raw, calendar)
+print(clean.filter(like="is_").sum())              # 每类问题各处理了多少行——留痕</code></pre></details>
+<p class="small muted">现成的工具：<code>statsmodels.tsa.seasonal.STL(robust=True)</code> 做稳健分解；<code>ruptures</code> 做突变点检测；<code>sktime</code> 的 <code>HampelFilter</code>、<code>Imputer</code>；<code>pandas</code> 的 <code>interpolate(method="time")</code>。</p>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>清洗的第一步是对齐时间轴；"行不存在""NaN""0"是三件不同的事，<strong>NaN 绝不能当 0</strong>。</li>
+  <li>有季节的数据用季节填充；缺口太长就别硬填。</li>
+  <li>异常检测用稳健统计量（中位数、MAD），在去掉趋势和季节后的残差上判断。</li>
+  <li>异常要清洗，事件要保留并做成特征——区分它们靠业务日历，不靠阈值。</li>
+  <li>销量 ≠ 需求：缺货、限购会截断数据，要还原后再训练。</li>
+  <li>口径突变要对齐；最近几天的数据可能还没到齐，训练时截掉。</li>
+  <li>离现在越近的脏数据危害越大。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site, C = TS.clean;
+const nn = a => a.map(v => (Number.isFinite(v) ? v : null));
+const FULL = TS.data.retail(), N0 = FULL.y.length, M = 7;
+const sub = (a, b) => ({ dates: FULL.dates.slice(a, b), y: FULL.y.slice(a, b), event: FULL.event.slice(a, b) });
+const KINDS = [
+  ['gap', '缺行', 1], ['dup', '重复行', 1], ['miss', '零星空值', 1], ['block', '连续空值', 0], ['spike', '刷单尖峰', 1],
+  ['neg', '负值', 0], ['flat', '卡死', 0], ['stockout', '缺货截断', 0], ['shift', '口径突变', 0], ['tail', '尾部未到齐', 0],
+];
+
+/* ---------- 诊所 ---------- */
+Site.demo('clinic', {
+  controls: [
+    { k: 'kinds', type: 'checks', label: '注入哪些问题', options: KINDS },
+    { act: 'regen', label: '🎲 换一组', run: s => { s.seed = (s.seed || 11) + 1; } },
+    { act: 'all', label: '全部勾选', run: (s, d) => { KINDS.forEach(k => { s.kinds[k[0]] = true; }); d.root.querySelectorAll('.chks input').forEach(i => { i.checked = true; }); } },
+  ],
+  render(s, d) {
+    const ds = sub(N0 - 300, N0), dz = TS.dirty(ds, s.kinds, s.seed || 11), h = C.health(dz.rows, M), al = h.aligned, p = Site.pal(), t = dz.truth;
+    const pt = (idx, val) => idx.map(i => [i, val(i)]);
+    const gapIdx = t.gapDates.map(g => ds.dates.indexOf(g));
+    const main = S.line('拿到手的数据', nn(al.y), { c: 0, w: 1.6 });
+    if (t.shift >= 0) main.markLine = S.vline(ds.dates[t.shift], { label: '口径变更', c: p.crit });
+    if (t.tail.length) main.markArea = S.areas([[ds.dates[t.tail[0]], ds.dates[t.tail[2]], '未到齐', p.crit]]);
+    d.chart(0, {
+      xAxis: { data: ds.dates }, yAxis: { name: '件' }, dataZoom: true,
+      series: [
+        S.line('真值', ds.y, { c: p.muted, w: 1, dash: true, op: 0.8, z: 1 }), main,
+        S.scatter('尖峰/负值', pt(t.spike.concat(t.neg), i => al.y[i]), { c: p.crit, size: 9 }),
+        S.scatter('缺货', pt(t.stockout, i => al.y[i]), { c: 1, size: 7 }),
+        S.scatter('卡死', pt(t.flat, i => al.y[i]), { c: 6, size: 7 }),
+        S.scatter('空值/缺行（真值位置）', pt(t.miss.concat(t.block, gapIdx), i => ds.y[i]), { c: p.surface, size: 8, x: { itemStyle: { color: p.surface, borderColor: p.muted, borderWidth: 1.5 } } }),
+      ],
+    });
+    const evHit = h.outlierFlag.reduce((c, f, i) => c + (f && ds.event[i] && Number.isFinite(al.y[i]) ? 1 : 0), 0);
+    const tag = (bad, a, b) => `<span class="tag ${bad ? 'bad' : 'good'}">${bad ? a : (b || '正常')}</span>`;
+    const tr = h.tailRatio.map(v => Site.pct(v, 0)).join(' / ');
+    d.out(Site.table(['检查项', '体检结果（只看脏数据）', '答案（实际注入）', '结论'], [
+      ['行数 vs 天数', `${h.rows} 行，覆盖 ${h.span} 天`, '—', tag(h.rows !== h.span, '对不上')],
+      ['缺失的日期', h.missingDates + ' 天', t.gapDates.length + ' 天', tag(h.missingDates > 0, '需补全')],
+      ['重复的日期', h.dupRows + ' 条', t.dupDates.length + ' 条', tag(h.dupRows > 0, '需去重')],
+      ['空值', h.nullValues + ' 个', (t.miss.length + t.block.length) + ' 个', tag(h.nullValues > 0, '需填充')],
+      ['负值', h.negatives + ' 个', t.neg.length + ' 个', tag(h.negatives > 0, '需处理')],
+      ['连续 4 天以上相同值', h.flatRuns.length + ' 段', (t.flat.length ? 1 : 0) + ' 段', tag(h.flatRuns.length > 0, '疑似卡死')],
+      ['疑似异常点', `${h.outliers} 个（其中 ${evHit} 个落在促销/节假日）`, `${t.spike.length + t.neg.length} 个异常`, tag(h.outliers - evHit > 0, '需核对日历')],
+      ['水平突变', h.changePoint ? `${h.changePoint.date} 起变为 ${h.changePoint.ratio.toFixed(2)} 倍` : '未发现', t.shift >= 0 ? `${ds.dates[t.shift]} 起 ×${t.shiftRatio}` : '无', tag(!!h.changePoint, '需对齐口径')],
+      ['最后 3 天 ÷ 期望值', tr, t.tail.length ? '82% / 55% / 28%' : '无', tag(h.tailRatio[2] < 0.7, '疑似未到齐')],
+      ['缺货', '仅凭销量无法确认', t.stockout.length + ' 天', '<span class="tag">需要库存数据</span>'],
+    ]));
+  },
+});
+
+/* ---------- 对齐 ---------- */
+const RAW = [
+  ['2024-03-01', 100, ''], ['2024-03-02', 120, '首次上报'], ['2024-03-02', 125, '重复：修正后的值'],
+  ['2024-03-04', 90, '← 3 月 3 日没有行'], ['2024-03-05', NaN, '值为空'], ['2024-03-07', 130, '乱序'],
+  ['2024-03-06', 110, ''], ['2024-03-08', 140, ''], ['2024-03-08', 140, '完全重复'],
+];
+Site.demo('align-demo', {
+  controls: [{ k: 'rule', label: '重复行怎么合并', type: 'seg', options: [['last', '保留最后一条'], ['first', '保留第一条'], ['sum', '求和'], ['mean', '取均值']] }],
+  render(s, d) {
+    const al = C.align(RAW.map(r => ({ date: r[0], value: r[1] })), s.rule);
+    d.out(Site.table(['date', 'value', '备注'], RAW.map(r => [r[0], Number.isFinite(r[1]) ? r[1] : 'NULL', `<span class="muted">${r[2]}</span>`]), { num: [1] }), 0);
+    d.out(Site.table(['date', 'value'], al.dates.map((dt, i) => [dt, Number.isFinite(al.y[i]) ? al.y[i] : '<span class="tag bad">NaN</span>']), { num: [1] }) +
+      `<div class="small muted">补全 ${al.gaps} 个缺失日期，合并 ${al.dup} 条重复行，纠正 ${al.unordered} 处乱序。</div>`, 1);
+  },
+});
+
+/* ---------- 填充 ---------- */
+const METHODS = [['zero', '当 0 处理'], ['mean', '全局均值'], ['ffill', '前向填充'], ['linear', '线性插值'], ['seasonal', '季节填充']];
+Site.demo('impute-demo', {
+  controls: [
+    { k: 'pat', label: '缺失模式', type: 'seg', options: [['b9', '连续 9 天'], ['b21', '连续 21 天'], ['rand', '零星 12 个']] },
+    { k: 'method', label: '填充方法', type: 'select', options: METHODS, value: 'ffill' },
+  ],
+  render(s, d) {
+    const a = 895, b = 1000, y = FULL.y.slice(), miss = [];      // 2024 年 6–9 月；缺口放在没有促销的一段里
+    if (s.pat === 'rand') { const r = TS.rng(5); while (miss.length < 12) { const i = r.int(a + 8, b - 8); if (!miss.includes(i) && !FULL.event[i]) miss.push(i); } }
+    else for (let k = 0; k < (s.pat === 'b9' ? 9 : 21); k++) miss.push((s.pat === 'b9' ? 944 : 938) + k);
+    miss.forEach(i => { y[i] = NaN; });
+    const err = {}; let fill;
+    METHODS.forEach(mt => { const f = C.impute(y, mt[0], M); err[mt[0]] = TS.mean(miss.map(i => Math.abs(f[i] - FULL.y[i]))); if (mt[0] === s.method) fill = f; });
+    const show = new Array(b - a).fill(null);
+    miss.forEach(i => { show[i - a] = Math.round(fill[i]); if (s.pat !== 'rand') { if (i - 1 - a >= 0 && show[i - 1 - a] == null) show[i - 1 - a] = FULL.y[i - 1]; if (show[i + 1 - a] == null) show[i + 1 - a] = FULL.y[i + 1]; } });
+    d.chart(0, {
+      xAxis: { data: FULL.dates.slice(a, b) }, yAxis: { name: '件', scale: s.method !== 'zero' },
+      series: [S.line('真值', FULL.y.slice(a, b), { c: Site.pal().muted, dash: true, w: 1.2 }), S.line('观测到的数据', nn(y.slice(a, b)), { c: 0 }),
+        S.line('填充值', show, { c: 1, w: 2.5, sym: true, symSize: 5 })],
+    });
+    const best = METHODS.reduce((p, c) => err[c[0]] < err[p[0]] ? c : p);
+    d.out(Site.table(['填充方法', '填充误差 MAE（件）', '是当前最优的几倍'], METHODS.map(mt => [mt[1] + (mt[0] === best[0] ? ' <span class="tag good">最准</span>' : ''), err[mt[0]], (err[mt[0]] / err[best[0]]).toFixed(1) + '×']), { num: [1, 2], hl: METHODS.findIndex(mt => mt[0] === s.method) }));
+  },
+});
+
+/* ---------- 异常检测 ---------- */
+Site.demo('outlier-demo', {
+  controls: [
+    { k: 'method', label: '检测方法', type: 'seg', options: [['sigma', '全局 3σ'], ['iqr', '箱线图'], ['hampel', 'Hampel'], ['resid', '残差法']] },
+    { k: 'thr', label: '阈值（几倍离散度）', min: 1.5, max: 8, step: 0.5, value: 3 },
+    { k: 'log', label: '在对数尺度上判断（Hampel / 残差法）', type: 'check', value: true },
+  ],
+  setup(s) { // 注入 6 个中等幅度的尖峰（多 45%~80%）和 4 个故障下跌（只剩 40%~60%），都避开促销日
+    const ds = sub(N0 - 300, N0), r = TS.rng(13), y = ds.y.slice(), bad = new Set();
+    while (bad.size < 10) {
+      const i = r.int(20, 280);
+      if (ds.event[i] || bad.has(i) || bad.has(i - 1) || bad.has(i + 1)) continue;
+      y[i] = Math.round(y[i] * (bad.size < 6 ? 1.45 + 0.35 * r() : 0.4 + 0.2 * r())); bad.add(i);
+    }
+    s.data = { ds, y, bad };
+  },
+  render(s, d) {
+    const { ds, y, bad } = s.data, p = Site.pal();
+    const det = C.outliers(y, { method: s.method, thr: s.thr, m: M, log: s.log });
+    const hit = [], missd = [], fpEv = [], fp = [];
+    y.forEach((v, i) => { const f = det.flag[i]; if (bad.has(i)) (f ? hit : missd).push([i, v]); else if (f) (ds.event[i] ? fpEv : fp).push([i, v]); });
+    const lo = Math.min(...y) - 200, hiC = Math.max(...y) * 1.05, clip = a => a.map(v => Math.max(lo, Math.min(hiC, v)));
+    d.chart(0, {
+      xAxis: { data: ds.dates }, yAxis: { name: '件', min: Math.round(lo), max: Math.round(hiC), scale: false }, dataZoom: true,
+      series: [S.line('销量', y, { c: 0, w: 1.4 }), ...S.band(clip(det.lo), clip(det.hi), { c: p.muted, op: 0.18 }),
+        S.scatter('命中的异常', hit, { c: p.crit, size: 10 }), S.scatter('漏掉的异常', missd, { c: p.surface, size: 10, x: { itemStyle: { color: p.surface, borderColor: p.crit, borderWidth: 2 } } }),
+        S.scatter('误报：其实是促销/节假日', fpEv, { c: 3, size: 8 }), S.scatter('误报：正常的日子', fp, { c: p.muted, size: 7 })],
+    });
+    const prec = hit.length / Math.max(1, hit.length + fpEv.length + fp.length);
+    d.out(Site.tiles([
+      ['命中', `${hit.length} / ${bad.size}`, '查全率 ' + Site.pct(hit.length / bad.size, 0), hit.length >= bad.size - 1 ? 'good' : 'bad'],
+      ['漏报', missd.length, '', missd.length ? 'bad' : 'good'],
+      ['误报 · 事件', fpEv.length, '促销 / 节假日'],
+      ['误报 · 正常日', fp.length],
+      ['查准率', Site.pct(prec, 0), '标红的点里有多少是真异常'],
+    ]));
+  },
+});
+
+/* ---------- 缺货 ---------- */
+Site.demo('stockout-demo', {
+  controls: [
+    { k: 'len', label: '缺货持续', min: 3, max: 10, step: 1, value: 7, fmt: v => v + ' 天' },
+    { k: 'ago', label: '缺货结束距今', min: 0, max: 14, step: 1, value: 2, fmt: v => v + ' 天' },
+  ],
+  render(s, d) {
+    const E = 992, H = 14, a = E - 49, p = Site.pal(), sales = FULL.y.slice(0, E), stock = new Array(E).fill(1); // 今天 = 2024-09-19，前后没有促销
+    const st = E - s.ago - s.len;
+    for (let i = st; i < E - s.ago; i++) { sales[i] = Math.round(FULL.y[i] * (0.08 + 0.1 * ((i * 7) % 3) / 2)); stock[i] = 0; }
+    const fix = C.uncensor(sales, stock, M);
+    // 用固定参数的季节指数平滑（无趋势），避免"寻优"本身被脏数据带偏，便于单独观察缺货的影响
+    const fc = y => TS.ets(y.slice(-180), { alpha: 0.2, gamma: 0.1, trend: false, seasonal: 'mul', m: M }).forecast(H).mean;
+    const f0 = fc(sales), f1 = fc(fix), truth = FULL.y.slice(E, E + H), pad = new Array(E - a).fill(null);
+    const fixShow = new Array(E - a + H).fill(null); for (let i = st - 1; i <= E - s.ago && i < E; i++) fixShow[i - a] = fix[i];
+    const main = S.line('记录的销量', sales.slice(a).concat(new Array(H).fill(null)), { c: 0 });
+    main.markArea = S.areas([[FULL.dates[st], FULL.dates[E - s.ago - 1], '缺货', p.crit]]);
+    main.markLine = S.vline(FULL.dates[E], { label: '今天' });
+    d.chart(0, {
+      xAxis: { data: FULL.dates.slice(a, E + H) }, yAxis: { name: '件' },
+      series: [S.line('真实需求', FULL.y.slice(a, E + H), { c: p.muted, dash: true, w: 1.2 }), main, S.line('还原后的需求', fixShow, { c: 2, w: 2.5 }),
+        S.line('预测 · 用原始销量训练', pad.concat(f0), { c: 1, w: 2.5 }), S.line('预测 · 还原后训练', pad.concat(f1), { c: 5, w: 2.5 })],
+    });
+    const b0 = TS.sum(f0) / TS.sum(truth) - 1, b1 = TS.sum(f1) / TS.sum(truth) - 1;
+    let lost = 0; for (let i = st; i < E - s.ago; i++) lost += FULL.y[i] - sales[i];
+    d.out(Site.tiles([
+      ['缺货期间丢失的销量', lost, '件（真实需求 − 实际销量）'],
+      ['未来 14 天预测偏差 · 原始', Site.pct(b0), b0 < -0.05 ? '低估 → 继续缺货' : '基本无偏', b0 < -0.05 ? 'bad' : 'good'],
+      ['未来 14 天预测偏差 · 还原后', Site.pct(b1), Math.abs(b1) < 0.05 ? '基本无偏' : '', Math.abs(b1) < 0.05 ? 'good' : ''],
+    ]));
+  },
+});
+
+/* ---------- 口径突变 ---------- */
+Site.demo('shift-demo', {
+  controls: [{ k: 'fix', label: '对齐口径（把突变前的数据换算到新口径）', type: 'check', value: false }],
+  render(s, d) {
+    const ds = TS.data.dau(), dz = TS.dirty(ds, { shift: 1 }, 3), y = dz.y, p = Site.pal();
+    const cp = C.changePoint(C.deseason(y, M), 56), adj = y.map((v, i) => Math.round(i < cp.idx ? v * cp.ratio : v));
+    const main = S.line('拿到手的日活', y, { c: 0, w: 1.4, op: s.fix ? 0.35 : 1 });
+    main.markLine = S.vline([ds.dates[cp.idx]].concat(ds.release.map(i => ds.dates[i])), { label: '', c: p.muted });
+    main.markPoint = { symbol: 'pin', symbolSize: 1, label: { show: true, color: p.ink2, fontSize: 11, position: 'top', formatter: q => q.name }, data: [{ name: '检测到的突变', coord: [cp.idx, Math.max(...y)] }].concat(ds.release.map(i => ({ name: '发版', coord: [i, Math.max(...y) * 0.94] }))) };
+    const series = [main]; if (s.fix) series.push(S.line('对齐到新口径后', adj, { c: 2, w: 1.8 }));
+    d.chart(0, { xAxis: { data: ds.dates }, yAxis: { name: '人' }, series });
+    const curve = S.line('突变统计量', nn(cp.curve.map(v => Number.isFinite(v) ? +v.toFixed(2) : NaN)), { c: 6, w: 1.6 });
+    curve.markLine = S.hline([3.5, -3.5], { label: '', c: p.crit });
+    d.chart(1, { xAxis: { data: ds.dates }, yAxis: { name: '稳健标准差的倍数' }, legend: false, series: [curve] });
+    d.out(Site.tiles([
+      ['估计的突变日期', ds.dates[cp.idx], '真实：' + ds.dates[dz.truth.shift], Math.abs(cp.idx - dz.truth.shift) <= 2 ? 'good' : ''],
+      ['估计的比例', cp.ratio.toFixed(3), '真实：' + dz.truth.shiftRatio],
+      ['突变统计量', cp.stat.toFixed(1), '阈值 ±3.5', 'bad'],
+    ]));
+  },
+});
+
+/* ---------- 尾部未到齐 ---------- */
+Site.demo('tail-demo', {
+  controls: [{ k: 'cut', label: '截掉最后 3 天未到齐的数据再预测', type: 'check', value: false }],
+  render(s, d) {
+    const E = 990, a = E - 35, H = 7, p = Site.pal(), y = FULL.y.slice(0, E); // 今天 = 2024-09-17，未来一周没有促销
+    [0.82, 0.55, 0.28].forEach((f, k) => { y[E - 3 + k] = Math.round(y[E - 3 + k] * f); });
+    const train = s.cut ? y.slice(0, E - 3) : y, h = s.cut ? H + 3 : H, f = TS.fc.snaive(train, h, 7);
+    const pad = new Array((s.cut ? E - 3 : E) - a).fill(null), truth = FULL.y.slice(E, E + H), fut = f.slice(-H);
+    const main = S.line('拿到手的数据', y.slice(a).concat(new Array(H).fill(null)), { c: 0 });
+    main.markArea = S.areas([[FULL.dates[E - 3], FULL.dates[E - 1], '未到齐', p.crit]]);
+    d.chart(0, { xAxis: { data: FULL.dates.slice(a, E + H) }, yAxis: { name: '件' },
+      series: [S.line('最终真值', FULL.y.slice(a, E + H), { c: p.muted, dash: true, w: 1.2 }), main, S.line('预测（和上周同一天一样）', pad.concat(f), { c: 1, w: 2.5 })] });
+    const bias = TS.sum(fut) / TS.sum(truth) - 1;
+    d.out(Site.tiles([['未来 7 天预测偏差', Site.pct(bias), bias < -0.08 ? '被假下跌带偏' : '恢复正常', bias < -0.08 ? 'bad' : 'good'], ['预测误差 MAE', TS.metrics(truth, fut).mae, '件']]));
+  },
+});
+
+/* ---------- 清洗的回报 ---------- */
+const MODELS = [
+  ['季节朴素', (y, h) => TS.fc.snaive(y, h, 7)],
+  ['Holt-Winters', (y, h) => TS.etsFit(y.slice(-365), { trend: true, seasonal: 'add', m: 7 }).forecast(h).mean],
+  ['趋势回归（全历史）', (y, h) => { // y ~ 截距 + 时间 + 星期哑变量，用最近一年拟合
+    const N = y.length, st = Math.max(0, N - 365), X = [], Y = [];
+    const row = i => { const r = [1, (i - st) / 365]; for (let k = 1; k < 7; k++) r.push(+(i % 7 === k)); return r; };
+    for (let i = st; i < N; i++) { X.push(row(i)); Y.push(y[i]); }
+    const b = TS.ols(X, Y).beta;
+    return Array.from({ length: h }, (_, j) => row(N + j).reduce((sum, v, k) => sum + v * b[k], 0));
+  }],
+];
+Site.demo('payoff-demo', {
+  controls: [
+    { k: 'kinds', type: 'checks', label: '注入哪些问题（集中在最近 180 天）', options: KINDS.map(k => [k[0], k[1], 1]) },
+    { act: 'regen', label: '🎲 换一组脏数据', run: s => { s.seed = (s.seed || 21) + 1; } },
+    { act: 'none', label: '全部取消', run: (s, d) => { KINDS.forEach(k => { s.kinds[k[0]] = false; }); d.root.querySelectorAll('.chks input').forEach(i => { i.checked = false; }); } },
+  ],
+  render(s, d) {
+    const H = 28, cut = N0 - H, tr = sub(0, cut), dz = TS.dirty(tr, s.kinds, s.seed || 21, { recent: 180 }), p = Site.pal();
+    const sc = s.kinds.shift ? dz.truth.shiftRatio : 1, truth = FULL.y.slice(cut).map(v => v * sc), clean = tr.y.map(v => v * sc);
+    const naive = C.align(dz.rows, 'last').y.map(v => (Number.isFinite(v) ? v : 0));
+    const pl = C.pipeline(dz.rows, { m: M, stock: dz.stock, event: tr.event });
+    const res = MODELS.map(([nm, f]) => { const a = f(naive, H), b = f(pl.y, H + pl.cut).slice(pl.cut), o = f(clean, H); return { nm, a, b, o, ea: TS.metrics(truth, a).mae, eb: TS.metrics(truth, b).mae, eo: TS.metrics(truth, o).mae }; });
+    d.chart(0, {
+      xAxis: { data: res.map(r => r.nm) }, yAxis: { name: 'MAE（件）', scale: false },
+      series: [S.bar('脏数据直接用（空值当 0）', res.map(r => Math.round(r.ea)), { c: 7 }), S.bar('清洗后', res.map(r => Math.round(r.eb)), { c: 0 }), S.bar('用真值训练（理想上限）', res.map(r => Math.round(r.eo)), { c: p.muted, op: 0.6 })],
+    });
+    const a0 = cut - 56, x = FULL.dates.slice(a0), pad = new Array(56).fill(null), hw = res[1];
+    d.chart(1, {
+      xAxis: { data: x }, yAxis: { name: '件' },
+      series: [S.line('真值', FULL.y.slice(a0).map(v => v * sc), { c: p.muted, dash: true, w: 1.2 }), S.line('脏数据', naive.slice(a0).concat(new Array(H).fill(null)), { c: 7, w: 1, op: 0.6 }),
+        S.line('预测 · 脏数据', pad.concat(hw.a), { c: 7, w: 2.5 }), S.line('预测 · 清洗后', pad.concat(hw.b), { c: 0, w: 2.5 })],
+    });
+    d.out(Site.tiles(res.map(r => [r.nm, (r.ea / r.eb).toFixed(1) + '×', '脏数据误差 ÷ 清洗后误差', r.ea / r.eb > 1.15 ? 'good' : ''])) +
+      '<div class="chart-cap">清洗流水线日志</div>' + Site.table(['步骤', '做了什么'], pl.log));
+  },
+});
+
+Site.flow('flow', [
+  { t: '① 对齐时间轴', d: '<p>去重、补全日期。<strong>必须最先做</strong>：后面所有基于"相邻""上周同一天"的计算都依赖规整的时间轴。</p>' },
+  { t: '② 明确不可信的值置空', d: '<p>负值、卡死的重复值、缺货日——这些有明确规则、不需要统计判断的问题先处理掉，统一变成 NaN。这样它们不会污染下一步异常检测用的"正常水平"估计。</p>' },
+  { t: '③ 截掉未成熟的尾部', d: '<p>最后几天如果没到齐，既不能当异常修（它们会被修成"估计值"冒充最新信息），也不能留着。直接截掉，多预测几步。</p>' },
+  { t: '④ 稳健异常检测', d: '<p>在去趋势、去季节后的残差上用 MAD 判断。检出的点<strong>先对业务日历</strong>：促销、节假日保留；其余置空。放在第 ② 步之后，是因为先去掉明显的坏值，稳健估计才更准。</p>' },
+  { t: '⑤ 口径对齐', d: '<p>检测水平突变，把老口径数据换算到新口径。放在异常处理之后，是为了不让尖峰和缺货干扰突变点两侧水平的估计。</p>' },
+  { t: '⑥ 一次性填充', d: '<p>所有被置空的位置（原生缺失 + 各步骤清掉的值）最后统一做一次季节填充。<strong>先全部置空、最后一起填</strong>，可以避免"用一个坏值去填另一个缺失"。</p>' },
+  { t: '⑦ 输出标记列', d: '<p>输出清洗后的值，同时保留原始值和每一类问题的标记列，供建模当特征、供日后审计。</p>' },
+]);
+
+Site.quiz('quiz', [
+  { q: '某门店周三的销量记录为空（NULL），原因是当天 POS 机故障没有上传数据。合理的处理是？', opts: ['填 0，因为没有销量记录', '删掉这一行，让周二后面直接接周四', '保留这一天，标记为缺失，用季节填充等方法估计', '用全年平均销量填充'], ans: 2, why: '当天有销售只是没记录到，填 0 会制造假暴跌；删行会让时间轴错位。应保留日期、标记缺失、按"周三通常是多少"来估计。' },
+  { q: '异常检测标出了双 11 当天的销量（是平日的 3 倍）。应该怎么做？', opts: ['删除并用插值填充，避免影响模型', '保留原值，并增加"是否大促"之类的事件特征', '把它缩尾到 3σ 边界', '把整个 11 月的数据都删掉'], ans: 1, why: '双 11 是会重复发生、日期已知的事件。删掉或压平它，模型就永远学不会大促，明年备货会严重不足。' },
+  { q: '为什么异常检测推荐用"中位数 + MAD"而不是"均值 + 标准差"？', opts: ['计算更快', '均值和标准差会被异常值本身拉偏，导致判定带变宽、漏报增多', 'MAD 的数值更大', '中位数只适用于时间序列'], ans: 1, why: '用被污染的统计量去判断污染是循环论证。中位数和 MAD 对少量极端值不敏感，尺子本身不会被带偏。' },
+  { q: '某商品上周连续 4 天缺货，销量记录接近 0。直接用这段数据训练，补货预测会怎样？', opts: ['偏高，因为模型会补偿缺货', '偏低，因为模型把"没货"当成了"没需求"', '不受影响', '只影响预测区间，不影响点预测'], ans: 1, why: '销量被库存截断，低于真实需求。不还原就训练，预测偏低 → 订货更少 → 更容易缺货，形成恶性循环。' },
+  { q: '今天是 12 月 4 日，你发现 12 月 1–3 日的订单量比正常低 20%–70%，而且越近越低。最可能的解释和处理是？', opts: ['需求在快速下滑，应立即下调预测', '最近几天的数据还没到齐，训练时应截掉这几天', '出现了口径突变，应按比例对齐', '这是异常值，应该用 3σ 规则删除'], ans: 1, why: '"越近越低"是数据未成熟的典型形状（结算、回填还没完成）。应量出成熟期，训练时截掉未成熟的尾部。' },
+]);
+</script>
+</body>
+</html>

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>05 预测基线与评估 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="05">
+<main>
+<p class="lead">在学任何"高级"模型之前，先学会两件更重要的事：<strong>拿什么当参照物</strong>（基线），以及<strong>怎么公平地打分</strong>（回测与指标）。评估方法错了，后面所有的模型对比都是自欺欺人。这一章的内容会被之后每一章反复用到。</p>
+
+<section id="baseline">
+<h2>四个基线：任何模型都要先打败它们</h2>
+<p>基线是不需要"训练"的最简单预测方法。它们的意义是给出一个底线：如果一个复杂模型连基线都打不过，它就不值得上线。</p>
+<div class="tw"><table>
+<thead><tr><th>基线</th><th>预测值</th><th>适用</th><th>业务里的叫法</th></tr></thead>
+<tbody>
+<tr><td><strong>均值法</strong></td><td>历史平均值</td><td>平稳、无趋势无季节</td><td>"按历史平均来"</td></tr>
+<tr><td><strong>朴素法</strong></td><td>最后一个观测值 $\hat y_{T+h}=y_T$</td><td>随机游走类数据（股价、汇率）</td><td>"和昨天一样"</td></tr>
+<tr><td><strong>季节朴素法</strong></td><td>上个周期同一位置 $\hat y_{T+h}=y_{T+h-m}$</td><td>季节明显的数据</td><td>"和上周同一天一样""和去年同期一样"</td></tr>
+<tr><td><strong>漂移法</strong></td><td>最后一个值 + 历史平均增量 × $h$</td><td>有稳定趋势</td><td>"按平均增速往上推"</td></tr>
+</tbody></table></div>
+<div class="demo" id="base-demo">
+  <div class="demo-title">🧪 实验：四个基线同台竞技</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+    <p class="hint">切换数据看谁赢：电商销量和日活上季节朴素明显领先；股价上谁也赢不了朴素法（上一章说过，随机游走的最佳预测就是当前值）；月度销售额既有趋势又有季节，四个基线都不够好——这正是后面要学更强模型的理由。</p>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 向业务方汇报模型效果时</div>
+  <p>不要只说"我们的模型 MAPE 是 12%"——没有参照物，这个数字没有意义。应该说"现在大家用的'和上周一样'误差是 18%，新模型是 12%，误差下降三分之一"。<strong>相对基线的提升</strong>才是模型的价值。</p>
+</div>
+</section>
+
+<section id="split">
+<h2>切分数据：只能用过去预测未来</h2>
+<p>普通机器学习习惯随机抽 20% 当测试集。时间序列<strong>绝对不能这样做</strong>：随机抽出的测试点，前一天和后一天都在训练集里，模型等于"看着答案的邻居做题"。</p>
+<div class="demo" id="leak-demo">
+  <div class="demo-title">🧪 实验：随机切分为什么会骗人</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">数据是上一章的股价（随机游走，本来就几乎不可预测）。这里的"模型"故意做得很傻：预测某一天时，直接取训练集里时间上最近的两个点求平均。随机切分下它"预测"得非常准——因为它总能找到紧挨着的前一天和后一天；换成时间切分（测试集全在未来），它只能拿最后见过的两天来猜，原形毕露。网上不少"模型预测股价准确率 99%"的结果就是这么来的。<strong>上线后面对的永远是右边这种情况。</strong></p>
+  </div>
+</div>
+</section>
+
+<section id="backtest">
+<h2>滚动起点回测：模拟"上线后每次预测"</h2>
+<p>只切一刀、测一次，结果很依赖那一段时间碰巧好不好预测。更可靠的做法是<strong>滚动起点回测</strong>（也叫时间序列交叉验证、walk-forward）：站在历史上的多个时间点，每次都只用当时能看到的数据训练，预测之后的 $h$ 步，再和真实值比。</p>
+<div class="demo" id="bt-demo">
+  <div class="demo-title">🧪 实验：一折一折地回测</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">每一折用到的数据（蓝 = 训练，橙 = 测试）</div>
+    <div class="chart" data-h="190"></div>
+    <div class="chart-cap">当前这一折：季节朴素法的预测 vs 实际</div>
+    <div class="chart" data-h="240"></div>
+    <div class="readout"></div>
+    <p class="hint">点"下一折"逐折查看。注意各折的误差并不一样——赶上促销的那一折误差会大很多。所以汇报时除了平均值，也要看<strong>最差的一折</strong>：它代表模型在最不利时期的表现。"滑动窗口"只用最近一段训练，适合老数据已经过时的情况。</p>
+  </div>
+</div>
+<div class="callout key">
+  <div class="hd">回测设计的四个参数</div>
+  <ul>
+    <li><strong>预测步长 $h$</strong>：必须等于业务真正需要的步长（提前 14 天订货，就回测 14 步）。</li>
+    <li><strong>折数</strong>：越多越稳，但越慢。日数据常用 5–10 折。</li>
+    <li><strong>步进</strong>：相邻两折的起点间隔，通常等于 $h$（测试段不重叠）。</li>
+    <li><strong>覆盖范围</strong>：测试段合起来最好覆盖一个完整的季节周期和至少一次大促，否则不知道模型在这些时期的表现。</li>
+  </ul>
+</div>
+</section>
+
+<section id="metrics">
+<h2>评估指标：每个指标都有自己的"脾气"</h2>
+<p>设实际值为 $y_t$，预测值为 $\hat y_t$，误差 $e_t = \hat y_t - y_t$：</p>
+<div class="tw"><table>
+<thead><tr><th>指标</th><th>公式</th><th>优点</th><th>脾气</th></tr></thead>
+<tbody>
+<tr><td><strong>MAE</strong></td><td>$\frac1n\sum|e_t|$</td><td>单位和原数据一致，好解释</td><td>不同量级的序列之间不能比</td></tr>
+<tr><td><strong>RMSE</strong></td><td>$\sqrt{\frac1n\sum e_t^2}$</td><td>重罚大误差</td><td>对个别离群点非常敏感</td></tr>
+<tr><td><strong>MAPE</strong></td><td>$\frac1n\sum\left|\frac{e_t}{y_t}\right|$</td><td>百分比，业务方最熟悉</td><td>实际值接近 0 时爆炸；低估最多罚 100%、高估没有上限，用它选模型会偏向低估</td></tr>
+<tr><td><strong>sMAPE</strong></td><td>$\frac1n\sum\frac{2|e_t|}{|y_t|+|\hat y_t|}$</td><td>有上界（200%）</td><td>名字叫"对称"其实不对称（同样的偏差幅度，低估罚得更重）；实际值为 0 时恒为 200%</td></tr>
+<tr><td><strong>WAPE</strong></td><td>$\frac{\sum|e_t|}{\sum|y_t|}$</td><td>按量加权，零值不怕；零售业首选</td><td>大销量的日子主导结果</td></tr>
+<tr><td><strong>MASE</strong></td><td>$\frac{\text{MAE}}{\text{训练集上季节朴素法的 MAE}}$</td><td>无量纲，&lt;1 即优于朴素法；跨序列可比</td><td>不直观，需要解释</td></tr>
+<tr><td><strong>Bias</strong></td><td>$\frac1n\sum e_t$</td><td>看系统性高估还是低估</td><td>正负会抵消，不能单独用</td></tr>
+</tbody></table></div>
+<div class="demo" id="metric-demo">
+  <div class="demo-title">🧪 指标实验室：给预测"加料"，看各指标的反应</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="250"></div>
+    <div class="readout"></div>
+    <p class="hint">① 先把"随机误差"调到 0，只调"系统性偏差"：+20% 和 −20% 时 MAE、MAPE 都一样，sMAPE 却不一样——它并不像名字说的那样对称。② 把随机误差调回来，勾选"一个离群点"：RMSE 暴涨，MAE 涨得少得多。③ 勾选"接近 0 的实际值"：MAPE 直接失控（两个小数字上的误差被放大成百分之几千），WAPE 几乎不动。<strong>这就是为什么零售行业普遍用 WAPE 而不是 MAPE。</strong></p>
+  </div>
+</div>
+<div class="tw"><table>
+<thead><tr><th>业务场景</th><th>推荐指标</th><th>原因</th></tr></thead>
+<tbody>
+<tr><td>单条序列，给业务方看</td><td>MAE + WAPE</td><td>一个有单位、一个是百分比，都好解释</td></tr>
+<tr><td>很多 SKU / 门店汇总评估</td><td>WAPE（按销量加权）、MASE</td><td>不被小销量商品的百分比误差绑架</td></tr>
+<tr><td>大误差代价特别高（电力调峰）</td><td>RMSE，另加"峰值时段误差"</td><td>重罚大偏差</td></tr>
+<tr><td>缺货和积压代价不对称</td><td>分位数损失（见下文）+ Bias</td><td>直接对应业务成本</td></tr>
+<tr><td>间歇性需求（大量 0）</td><td>MASE、WAPE；避免 MAPE</td><td>MAPE 无法计算</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="interval">
+<h2>预测区间：承认不确定性</h2>
+<p>点预测只给一个数，但未来是不确定的。<strong>预测区间</strong>给出一个范围和一个把握程度："未来 14 天的日销量有 95% 的可能落在这个带子里"。区间有两个要求：</p>
+<ul>
+  <li><strong>校准</strong>：说 95% 就应该真的有约 95% 的实际值落在里面（这个比例叫<strong>覆盖率</strong>）；</li>
+  <li><strong>尽量窄</strong>：一个宽到没有信息量的区间永远"正确"，但毫无用处。</li>
+</ul>
+<div class="demo" id="pi-demo">
+  <div class="demo-title">🧪 实验：预测区间与实际覆盖率</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="readout"></div>
+    <p class="hint">拖动置信水平，带子变宽变窄。更关键的是"实际覆盖率"：它是在过去 16 个时间点反复回测统计出来的，经常和名义值对不上。<strong>偏窄</strong>（覆盖率低于名义值）在真实项目里最常见——公式只算了随机噪声，没算模型本身可能是错的；<strong>偏宽</strong>也会发生——比如历史上的大促尖峰把"噪声大小"的估计撑大了，平常日子的区间就显得过于保守。无论哪种，结论都一样：模型自带的区间不能直接信，要用回测检验，并用回测误差的经验分位数来校准（这类方法叫保形预测，conformal prediction）。</p>
+  </div>
+</div>
+<p>评估区间和分位数预测，用<strong>分位数损失</strong>（pinball loss）。对分位数 $\tau$（比如 0.9）：</p>
+$$L_\tau(y,\hat q)=\begin{cases}\tau\,(y-\hat q) & y\ge \hat q\;\text{（预测低了）}\\ (1-\tau)\,(\hat q-y) & y<\hat q\;\text{（预测高了）}\end{cases}$$
+<p>$\tau=0.9$ 时，低估一件的惩罚是高估一件的 9 倍——于是最小化这个损失的预测，自然会落在"有 90% 把握不会低估"的位置。$\tau=0.5$ 时它就是 MAE。</p>
+</section>
+
+<section id="newsvendor">
+<h2>从预测到决策：报童模型</h2>
+<p>预测出"明天需求大约 1000 件"，是不是就该备 1000 件？<strong>不一定。</strong>如果缺货一件损失 40 元毛利，而多备一件只损失 10 元，那多备一些显然更划算。这个经典问题叫<strong>报童模型</strong>：</p>
+$$q^* = F^{-1}\!\left(\frac{C_u}{C_u + C_o}\right)$$
+<p>其中 $C_u$ 是<strong>缺货成本</strong>（少备一件的损失），$C_o$ 是<strong>积压成本</strong>（多备一件的损失），$F^{-1}$ 是需求分布的分位数函数。也就是说：<strong>最优备货量是需求分布的某个分位数，而这个分位数完全由两种成本的比例决定</strong>。</p>
+<div class="demo" id="nv-demo">
+  <div class="demo-title">🧪 实验：缺货贵还是积压贵？</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">不同备货量下的期望成本（需求预测：均值 1000 件）</div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">① 两种成本相等时，最优备货量 = 预测均值。② 把缺货成本调高（高毛利、缺货会流失客户）：最优点右移，多出来的部分就是<strong>安全库存</strong>。③ 把积压成本调高（生鲜、时装）：最优点左移，宁可卖断货。④ 把"预测不确定性"调大：成本曲线整体抬高——<strong>预测得越不准，越要多付成本</strong>，这就是提升预测精度在财务上的价值。</p>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 这对预测工作意味着什么</div>
+  <ul>
+    <li>业务要的往往不是"最可能卖多少"，而是"<strong>备多少最划算</strong>"——这需要分位数预测，而不只是点预测。</li>
+    <li>评估指标应贴合成本结构：缺货更贵的业务，低估比高估更该被惩罚（用 $\tau &gt; 0.5$ 的分位数损失）。</li>
+    <li>对预测区间的校准要求是实打实的：区间偏窄 → 安全库存算少 → 缺货率高于设计值。</li>
+  </ul>
+</div>
+</section>
+
+<section id="resid">
+<h2>残差诊断：模型还剩下什么没学到</h2>
+<p>指标告诉你模型"有多准"，残差（实际 − 拟合）告诉你它"哪里不准"。合格的残差应满足：</p>
+<div class="tw"><table>
+<thead><tr><th>检查</th><th>怎么看</th><th>不满足说明</th></tr></thead>
+<tbody>
+<tr><td>均值为 0</td><td>Bias 接近 0</td><td>系统性高估/低估——直接加个修正量就能变准</td></tr>
+<tr><td>没有自相关</td><td>残差的 ACF 落在虚线带内；Ljung-Box 检验 p 值不小</td><td>还有规律没被模型利用（第 07 章会用到）</td></tr>
+<tr><td>方差恒定</td><td>残差大小不随时间或水平变化</td><td>区间在某些时期偏窄；考虑对数变换</td></tr>
+<tr><td>按维度无偏</td><td>分星期几、分是否促销看 Bias</td><td>比如"周末总是低估"——缺了对应的特征</td></tr>
+</tbody></table></div>
+<details class="code" open><summary>Python 参考代码：基线、滚动回测、指标</summary>
+<pre><code>import numpy as np
+import pandas as pd
+
+# ---------- 指标 ----------
+def wape(y, f):  return np.abs(f - y).sum() / np.abs(y).sum()
+def mase(y, f, y_train, m=7):
+    scale = np.abs(y_train[m:] - y_train[:-m]).mean()      # 训练集上季节朴素的 MAE
+    return np.abs(f - y).mean() / scale
+def pinball(y, q, tau):
+    u = y - q
+    return np.mean(np.where(u &gt;= 0, tau * u, (tau - 1) * u))
+
+# ---------- 基线 ----------
+def seasonal_naive(train, h, m=7):
+    return np.array([train[len(train) - m + (i % m)] for i in range(h)])
+
+# ---------- 滚动起点回测 ----------
+def backtest(y, model, h=14, folds=6, step=None, m=7):
+    step = step or h
+    rows = []
+    for k in range(folds - 1, -1, -1):
+        cut = len(y) - h - k * step
+        train, test = y[:cut], y[cut:cut + h]
+        f = model(train, h)
+        rows.append({"cut": cut, "MAE": np.abs(f - test).mean(),
+                     "WAPE": wape(test, f), "MASE": mase(test, f, train, m),
+                     "Bias": (f - test).mean()})
+    return pd.DataFrame(rows)
+
+res = backtest(y.values, seasonal_naive)
+print(res.round(3)); print(res.mean().round(3))
+
+# 现成的工具
+# sklearn.model_selection.TimeSeriesSplit(n_splits=5, test_size=14)
+# statsforecast: StatsForecast(models=[SeasonalNaive(7), AutoETS(7)], freq="D").cross_validation(h=14, n_windows=6)</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>先建基线（季节数据用季节朴素法）；模型的价值 = 相对基线的提升。</li>
+  <li>时间序列只能按时间切分；随机切分会让模型偷看到未来的邻居。</li>
+  <li>滚动起点回测：多个起点、步长等于业务步长、看平均也看最差的一折。</li>
+  <li>RMSE 怕离群点，MAPE 怕接近 0 的实际值且不对称；零售多用 WAPE，跨序列比较用 MASE。</li>
+  <li>预测区间要校准；模型自带的区间未必可信，要用回测检验实际覆盖率。</li>
+  <li>备多少货是决策问题：最优备货量是需求分布的 $C_u/(C_u+C_o)$ 分位数。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+
+/* ---------- 四个基线 ---------- */
+const BASES = [['snaive', '季节朴素', 1], ['naive', '朴素', 2], ['drift', '漂移', 4], ['mean', '均值', 6]];
+Site.demo('base-demo', {
+  controls: [
+    { k: 'ds', label: '数据', type: 'select', options: [['retail', '电商日销量'], ['dau', 'App 日活'], ['monthly', '月度销售额'], ['stock', '股价']] },
+    { k: 'h', label: '预测步长', min: 1, max: 4, step: 1, value: 2, fmt: v => v + ' 个周期' },
+  ],
+  render(s, d) {
+    const ds = TS.data[s.ds](), m = ds.period, h = s.h * m, cut = ds.y.length - h - (s.ds === 'retail' ? 21 : 0); // 销量避开年底几天
+    const train = ds.y.slice(0, cut), actual = ds.y.slice(cut, cut + h), show = Math.min(cut, 6 * m), pad = new Array(show).fill(null);
+    const fc = { snaive: TS.fc.snaive(train, h, m), naive: TS.fc.naive(train, h), drift: TS.fc.drift(train, h), mean: TS.fc.mean(train, h) };
+    const series = [S.line('历史', train.slice(-show).concat(new Array(h).fill(null)), { c: 0 }), S.line('实际', pad.concat(actual), { c: 0, op: 0.35 })];
+    BASES.forEach(b => series.push(S.line(b[1], pad.concat(fc[b[0]]), { c: b[2], dash: true })));
+    d.chart(0, { xAxis: { data: ds.dates.slice(cut - show, cut + h) }, yAxis: { name: ds.unit }, series });
+    const rows = BASES.map(b => { const mt = TS.metrics(actual, fc[b[0]], { train, m }); return [b[1], mt.mae, Site.pct(mt.wape), mt.mase.toFixed(2)]; });
+    const best = rows.reduce((bi, r, i) => (r[1] < rows[bi][1] ? i : bi), 0);
+    rows[best][0] += ' <span class="tag good">最好</span>';
+    d.out(Site.table(['基线', 'MAE（' + ds.unit + '）', 'WAPE', 'MASE'], rows, { num: [1, 2, 3], hl: best }));
+  },
+});
+
+/* ---------- 随机切分 vs 时间切分 ---------- */
+Site.demo('leak-demo', {
+  controls: [{ k: 'split', label: '怎么切分训练集和测试集', type: 'seg', options: [['random', '随机抽 20%（错误）'], ['time', '最后 20%（正确）']] }],
+  render(s, d) {
+    const ds = TS.data.stock(), a = 250, n = 250, y = ds.y.slice(a, a + n), x = ds.dates.slice(a, a + n), p = Site.pal();
+    const evalSplit = isTest => { // "最近邻"模型：取训练集里时间上最近的两个点求平均
+      const tr = [], te = [], pr = []; let err = 0, c = 0;
+      for (let i = 0; i < n; i++) (isTest(i) ? te : tr).push(i);
+      te.forEach(i => { const near = tr.slice().sort((u, v) => Math.abs(u - i) - Math.abs(v - i)).slice(0, 2), f = (y[near[0]] + y[near[1]]) / 2; pr.push([i, +f.toFixed(2)]); err += Math.abs(f - y[i]); c++; });
+      return { tr, te, pr, mae: err / c };
+    };
+    const r = TS.rng(77), pick = new Set(); while (pick.size < n * 0.2) pick.add(r.int(2, n - 3));
+    const R = evalSplit(i => pick.has(i)), T = evalSplit(i => i >= n * 0.8), cur = s.split === 'random' ? R : T;
+    d.chart(0, {
+      xAxis: { data: x }, yAxis: { name: '元' },
+      series: [S.line('股价', y, { c: p.muted, w: 1, op: 0.6 }), S.scatter('训练集', cur.tr.map(i => [i, y[i]]), { c: 0, size: 4, ring: false }),
+        S.scatter('测试集（实际）', cur.te.map(i => [i, y[i]]), { c: 1, size: 8 }), S.scatter('模型的预测', cur.pr, { c: 6, size: 8, x: { symbol: 'diamond' } })],
+    });
+    d.out(Site.tiles([
+      ['随机切分下的 MAE', R.mae, '看起来很准', s.split === 'random' ? 'good' : ''],
+      ['时间切分下的 MAE', T.mae, '上线后的真实水平', s.split === 'time' ? 'bad' : ''],
+      ['随机切分把误差低估了', (T.mae / R.mae).toFixed(1) + ' 倍'],
+    ]));
+  },
+});
+
+/* ---------- 滚动回测 ---------- */
+Site.demo('bt-demo', {
+  controls: [
+    { k: 'folds', label: '折数', min: 3, max: 8, step: 1, value: 5 },
+    { k: 'h', label: '预测步长 h', type: 'seg', options: [[7, '7 天'], [14, '14 天'], [28, '28 天']], value: 14 },
+    { k: 'win', label: '训练窗口', type: 'seg', options: [['expand', '扩展（用全部历史）'], ['slide', '滑动（只用最近 120 天）']] },
+    { act: 'next', label: '下一折 ▶', primary: true, run: s => { s.cur = ((s.cur || 0) + 1) % s.folds; } },
+  ],
+  render(s, d) {
+    const ds = TS.data.retail(), n0 = 1060, a0 = n0 - 400, y = ds.y.slice(a0, n0), dates = ds.dates.slice(a0, n0), n = y.length, p = Site.pal();
+    const bt = TS.backtest(y, (tr, h) => TS.fc.snaive(tr, h, 7), { h: s.h, folds: s.folds, m: 7, window: s.win === 'slide' ? 120 : 0 });
+    const F = bt.folds, cur = Math.min(s.cur || 0, F.length - 1), op = i => (i === cur ? 1 : 0.35);
+    const st = F.map(f => (s.win === 'slide' ? Math.max(0, f.cut - 120) : 0));
+    d.chart(0, {
+      xAxis: { type: 'value', min: 0, max: n, axisLabel: { formatter: v => dates[Math.min(n - 1, v)] ? dates[Math.min(n - 1, v)].slice(2, 7) : '' }, splitLine: { show: false } },
+      yAxis: { type: 'category', data: F.map((_, i) => '第 ' + (i + 1) + ' 折'), inverse: true, splitLine: { show: false } }, tooltip: false,
+      series: [
+        { type: 'bar', stack: 'a', name: '_skip', data: st, itemStyle: { color: 'transparent' }, silent: true },
+        { type: 'bar', stack: 'a', name: '训练', data: F.map((f, i) => ({ value: f.cut - st[i], itemStyle: { color: p.s[0], opacity: op(i), borderRadius: 3 } })), barWidth: '55%', itemStyle: { color: p.s[0] } },
+        { type: 'bar', stack: 'a', name: '测试', data: F.map((f, i) => ({ value: s.h, itemStyle: { color: p.s[1], opacity: op(i), borderRadius: 3 } })), itemStyle: { color: p.s[1] } },
+      ],
+    });
+    const f = F[cur], v0 = Math.max(0, f.cut - 70), pad = new Array(f.cut - v0).fill(null);
+    const main = S.line('训练数据', y.slice(v0, f.cut).concat(new Array(s.h).fill(null)), { c: 0 });
+    main.markLine = S.vline(dates[f.cut], { label: '预测起点' });
+    d.chart(1, { xAxis: { data: dates.slice(v0, f.cut + s.h) }, yAxis: { name: '件' },
+      series: [main, S.line('实际', pad.concat(f.actual), { c: 0, op: 0.4 }), S.line('季节朴素预测', pad.concat(f.pred), { c: 1, dash: true, w: 2.5 })] });
+    const maes = F.map(q => q.metrics.mae), worst = maes.indexOf(Math.max(...maes));
+    d.out(Site.table(['折', '预测起点', 'MAE', 'WAPE', 'Bias'], F.map((q, i) => ['第 ' + (i + 1) + ' 折' + (i === worst ? ' <span class="tag bad">最差</span>' : ''), dates[q.cut], q.metrics.mae, Site.pct(q.metrics.wape), q.metrics.bias]), { num: [2, 3, 4], hl: cur }) +
+      Site.tiles([['平均 MAE', bt.avg.mae], ['各折 MAE 的标准差', TS.std(maes), '越大说明表现越不稳定'], ['最差一折 ÷ 平均', (Math.max(...maes) / bt.avg.mae).toFixed(1) + ' 倍'], ['平均 MASE', bt.avg.mase.toFixed(2), '季节朴素法自己约等于 1']]));
+  },
+});
+
+/* ---------- 指标实验室 ---------- */
+Site.demo('metric-demo', {
+  controls: [
+    { k: 'bias', label: '系统性偏差', min: -30, max: 30, step: 5, value: 0, fmt: v => (v > 0 ? '+' : '') + v + '%' },
+    { k: 'noise', label: '随机误差', min: 0, max: 20, step: 2, value: 6, fmt: v => v + '%' },
+    { k: 'outlier', label: '一个离群点（某天实际销量暴增到 4 倍）', type: 'check', value: false },
+    { k: 'zeros', label: '两个接近 0 的实际值（临时闭店）', type: 'check', value: false },
+  ],
+  render(s, d) {
+    const ds = TS.data.retail(), a = 976, n = 14, r = TS.rng(3), base = ds.y.slice(a, a + n), train = ds.y.slice(a - 70, a);
+    const f = base.map(v => Math.round(v * (1 + s.bias / 100) + v * s.noise / 100 * r.n())), y = base.slice();
+    if (s.outlier) y[8] = y[8] * 4;
+    if (s.zeros) { y[3] = 6; y[11] = 14; }
+    d.chart(0, { xAxis: { data: ds.dates.slice(a, a + n).map(v => v.slice(5)) }, yAxis: { name: '件', scale: false }, series: [S.bar('实际', y, { c: 0, op: 0.75 }), S.line('预测', f, { c: 1, sym: true, w: 2.5 })] });
+    const m = TS.metrics(y, f, { train, m: 7 });
+    d.out(Site.tiles([
+      ['MAE', m.mae, '件'], ['RMSE', m.rmse, 'RMSE ÷ MAE = ' + (m.rmse / m.mae).toFixed(2), m.rmse / m.mae > 2 ? 'bad' : ''],
+      ['MAPE', Site.pct(m.mape), m.mape > 1 ? '失控了' : '', m.mape > 1 ? 'bad' : ''], ['sMAPE', Site.pct(m.smape)],
+      ['WAPE', Site.pct(m.wape), '', m.mape > 1 ? 'good' : ''], ['MASE', m.mase.toFixed(2), m.mase < 1 ? '优于季节朴素' : '不如季节朴素'], ['Bias', m.bias, m.bias > 0 ? '整体高估' : '整体低估'],
+    ]));
+  },
+});
+
+/* ---------- 预测区间 ---------- */
+Site.demo('pi-demo', {
+  controls: [{ k: 'lvl', label: '置信水平', min: 50, max: 99, step: 1, value: 95, fmt: v => v + '%' }],
+  setup(s) { // 在过去 16 个时间点各预测 14 天，记录"标准化误差"，用于统计任意置信水平下的实际覆盖率
+    const ds = TS.data.retail(), z = [];
+    for (let k = 0; k < 16; k++) {
+      const cut = 1080 - 14 * (k + 1), fit = TS.etsFit(ds.y.slice(cut - 365, cut), { trend: true, seasonal: 'mul', m: 7 }), fc = fit.forecast(14);
+      for (let i = 0; i < 14; i++) z.push((ds.y[cut + i] - fc.mean[i]) / fc.se[i]);
+      if (k === 4) s.show = { cut, fit };
+    }
+    s.z = z;
+  },
+  render(s, d) {
+    const ds = TS.data.retail(), { cut, fit } = s.show, h = 28, fc = fit.forecast(h, s.lvl / 100), v0 = cut - 56, pad = new Array(56).fill(null);
+    d.chart(0, { xAxis: { data: ds.dates.slice(v0, cut + h) }, yAxis: { name: '件' },
+      series: [S.line('历史', ds.y.slice(v0, cut).concat(new Array(h).fill(null)), { c: 0 }), S.line('实际', pad.concat(ds.y.slice(cut, cut + h)), { c: 0, op: 0.4 }),
+        S.line('点预测', pad.concat(fc.mean), { c: 1, dash: true }), ...S.band(pad.concat(fc.lo), pad.concat(fc.hi), { c: 1 })] });
+    const zq = TS.normInv(0.5 + s.lvl / 200), cov = s.z.filter(v => Math.abs(v) <= zq).length / s.z.length;
+    d.out(Site.tiles([
+      ['名义置信水平', s.lvl + '%'], ['实际覆盖率', Site.pct(cov, 0), `共 ${s.z.length} 个点；` + (cov < s.lvl / 100 - 0.05 ? '区间偏窄' : cov > s.lvl / 100 + 0.05 ? '区间偏宽' : '校准良好'), Math.abs(cov - s.lvl / 100) > 0.05 ? 'bad' : 'good'],
+      ['区间半宽 · 第 1 天 → 第 28 天', Math.round(zq * fc.se[0]) + ' → ' + Math.round(zq * fc.se[h - 1]), '越远越宽'],
+    ]));
+  },
+});
+
+/* ---------- 报童模型 ---------- */
+Site.demo('nv-demo', {
+  controls: [
+    { k: 'cu', label: '缺货成本 Cu（少备一件的损失）', min: 5, max: 100, step: 5, value: 40, fmt: v => v + ' 元' },
+    { k: 'co', label: '积压成本 Co（多备一件的损失）', min: 5, max: 100, step: 5, value: 10, fmt: v => v + ' 元' },
+    { k: 'sd', label: '预测不确定性（需求的标准差）', min: 50, max: 400, step: 25, value: 200, fmt: v => v + ' 件' },
+  ],
+  render(s, d) {
+    const mu = 1000, sd = s.sd, phi = z => Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI), p = Site.pal();
+    const cost = q => { const z = (q - mu) / sd, P = TS.normCdf(z); return sd * (s.co * (phi(z) + z * P) + s.cu * (phi(z) - z * (1 - P))); };
+    const ratio = s.cu / (s.cu + s.co), qs = Math.round(mu + TS.normInv(ratio) * sd), xs = [];
+    for (let q = 300; q <= 1900; q += 20) xs.push(q);
+    const ser = S.line('期望成本', xs.map(q => Math.round(cost(q))), { c: 0, w: 2.5 });
+    ser.markLine = { symbol: 'none', silent: true, label: { color: p.ink2, fontSize: 11 }, data: [
+      { xAxis: (1000 - 300) / 20, lineStyle: { color: p.muted, type: 'dashed' }, label: { formatter: '按预测均值备货', position: 'insideEndTop' } },
+      { xAxis: Math.round((Math.min(1900, Math.max(300, qs)) - 300) / 20), lineStyle: { color: p.s[1], width: 2 }, label: { formatter: '成本最低', position: 'insideStartTop' } }] };
+    d.chart(0, { xAxis: { data: xs, name: '备货量（件）', nameLocation: 'middle', nameGap: 24 }, yAxis: { name: '元', scale: false }, legend: false, series: [ser] });
+    const save = cost(mu) - cost(qs);
+    d.out(Site.tiles([
+      ['临界比 Cu / (Cu + Co)', ratio.toFixed(2), `应备到需求的 ${Math.round(ratio * 100)}% 分位数`],
+      ['最优备货量', qs, qs >= mu ? '比预测均值多 ' + (qs - mu) + ' 件（安全库存）' : '比预测均值少 ' + (mu - qs) + ' 件'],
+      ['设计缺货概率', Site.pct(1 - ratio, 0), '每 100 天约有这么多天会卖断'],
+      ['最优策略的期望成本', Math.round(cost(qs)), '元 / 天'],
+      ['比"按均值备货"每天省', Math.round(save), '元', save > 1 ? 'good' : ''],
+    ]));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '一个有明显周季节的日销量序列，最合适的基线是？', opts: ['历史均值', '朴素法（等于昨天）', '季节朴素法（等于上周同一天）', '不需要基线'], ans: 2, why: '季节朴素法直接利用了最主要的规律（周内节奏），是季节数据的标准基线。' },
+  { q: '同事用随机抽样把日销量数据分成训练集和测试集，报告测试误差只有 2%。你应该？', opts: ['祝贺他，模型很好', '要求他改用按时间切分的滚动回测重新评估', '建议他增加模型复杂度', '建议他换一个指标'], ans: 1, why: '随机切分下，测试点的前后邻居都在训练集里，模型等于偷看了未来，误差被严重低估。' },
+  { q: '评估 5000 个 SKU 的销量预测，其中很多长尾 SKU 日销量只有 0–3 件。用哪个指标汇总最合适？', opts: ['所有 SKU 的 MAPE 取平均', 'WAPE（总绝对误差 ÷ 总实际销量）', 'RMSE 取平均', '只看最大误差'], ans: 1, why: '实际值为 0 或很小时 MAPE 无法计算或被放大到几百上千。WAPE 按量加权，不受小销量商品的百分比误差绑架。' },
+  { q: '模型给出的 95% 预测区间，回测发现只有 80% 的实际值落在里面。这意味着？', opts: ['模型的点预测有偏', '区间偏窄，低估了不确定性；按它算安全库存会导致缺货率高于预期', '区间偏宽，可以收窄', '没有问题'], ans: 1, why: '覆盖率低于名义水平 = 区间偏窄。常见原因是公式只算了噪声，没算事件和模型自身的误差。可以用回测误差的经验分位数修正。' },
+  { q: '某生鲜商品：缺货一件损失 6 元毛利，多备一件要报废损失 14 元成本。最优备货量应该在需求分布的哪个位置？', opts: ['均值（50% 分位数）', '70% 分位数', '30% 分位数', '95% 分位数'], ans: 2, why: '临界比 = Cu/(Cu+Co) = 6/(6+14) = 0.3。积压比缺货贵，所以应该备得比预测中位数少，宁可偶尔卖断。' },
+]);
+</script>
+</body>
+</html>

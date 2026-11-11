@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>时间序列实验室 · 从基础概念到 LSTM 的互动教程</title>
+<meta name="description" content="可以动手玩的时间序列分析教程：基础概念、脏数据清洗、ARIMA、机器学习、LSTM 与 Transformer，全部在浏览器里现场计算。">
+<link rel="stylesheet" href="assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div class="eyebrow">互动教程 · 电脑和手机都能学</div>
+    <h1>时间序列实验室</h1>
+    <p>从"什么是趋势和季节"一路讲到 ARIMA、GBDT、LSTM 和 Transformer。每个概念都配一个可以拖滑块的实验，所有模型都在你的浏览器里<strong>现场计算</strong>——不用装任何东西。</p>
+    <p><a class="btn primary" href="chapters/01-basics.html" style="display:inline-block;text-decoration:none">从第 01 章开始 →</a>
+       <a class="btn" href="chapters/12-business.html" style="display:inline-block;text-decoration:none;color:inherit">直接看模型竞技场</a></p>
+  </section>
+
+  <div class="demo" id="hero-demo">
+    <div class="demo-title">🧪 30 秒体验：让模型预测未来</div>
+    <div class="demo-body">
+      <div class="ctl"></div>
+      <div class="chart" data-h="320"></div>
+      <div class="readout"></div>
+      <p class="hint">蓝线是历史，橙色虚线是模型给出的预测，阴影是 95% 预测区间——预测得越远，区间越宽，这是所有预测模型的共同规律。这里用的是第 06 章的 Holt-Winters 模型。</p>
+    </div>
+  </div>
+
+  <h2>这个网站有什么不一样</h2>
+  <div class="cards">
+    <div class="card"><h4>🎛 能动手，不是只看</h4><p>100 多个互动实验：拖动参数，图表和指标立刻变化，公式不再是死的。</p></div>
+    <div class="card"><h4>🏪 贴着业务讲</h4><p>全程用电商销量、电力负荷、App 日活三份数据，围绕补货、调度、监控、促销评估这些真实问题。</p></div>
+    <div class="card"><h4>🧹 不回避脏数据</h4><p>缺失、重复、刷单尖峰、缺货截断、口径突变……专门一章讲怎么诊断和清洗。</p></div>
+    <div class="card"><h4>🔬 原理讲透</h4><p>ARIMA、决策树、GBDT、LSTM、注意力机制都是手写实现，能一步一步看它怎么算出来。</p></div>
+  </div>
+
+  <h2>学习路线</h2>
+  <div id="roadmap"></div>
+
+  <h2>怎么学效果最好</h2>
+  <ul>
+    <li><strong>按顺序学。</strong>后面的章节会反复用到前面的概念（比如第 05 章的回测方法，贯穿之后所有模型的对比）。</li>
+    <li><strong>每个实验都动手调一调。</strong>先猜"把这个参数调大会怎样"，再拖滑块验证，比读十遍公式有用。</li>
+    <li><strong>每章结构一致：</strong>业务问题 → 直觉 → 互动实验 → 原理与公式 → Python 参考代码 → 常见坑 → 小测验。</li>
+    <li><strong>需要的基础：</strong>高中数学就够起步；会一点 Python 能更好地用上每章的参考代码。</li>
+  </ul>
+  <div class="callout tip">
+    <div class="hd">关于数据和代码</div>
+    <p>页面里的业务数据都是按真实规律<strong>仿真生成</strong>的（固定随机种子，每次打开都一样），所以清洗和预测的效果可以和"真值"对比打分。页面内的算法是为教学手写的精简实现；真正上生产，请用每章给出的 Python 库（statsmodels、LightGBM、PyTorch 等）。</p>
+  </div>
+</main>
+
+<script src="assets/vendor/echarts.min.js"></script>
+<script src="assets/vendor/katex/katex.min.js"></script>
+<script src="assets/vendor/katex/auto-render.min.js"></script>
+<script src="assets/js/tslib.js"></script>
+<script src="assets/js/site.js"></script>
+<script>
+Site.roadmap('roadmap');
+const { S } = Site;
+
+Site.demo('hero-demo', {
+  controls: [
+    { k: 'ds', label: '业务数据', type: 'seg', options: [['retail', '电商销量'], ['load', '电力负荷'], ['dau', 'App 日活']] },
+    { k: 'h', label: '预测多远', min: 1, max: 6, step: 1, value: 3, fmt: v => v + ' 个周期' },
+  ],
+  render(s, d) {
+    const ds = TS.data[s.ds](), m = ds.period, h = s.h * m;
+    const show = Math.min(ds.y.length - h, m * 12);
+    const cut = ds.y.length - h;                       // 留出最后一段当"未来"，可以对答案
+    const train = ds.y.slice(Math.max(0, cut - m * 60), cut);
+    const fit = TS.etsFit(train, { trend: true, seasonal: 'mul', m });
+    const fc = fit.forecast(h), pad = new Array(show).fill(null);
+    const x = ds.dates.slice(cut - show);
+    const actual = ds.y.slice(cut);
+    const mt = TS.metrics(actual, fc.mean);
+    d.chart(0, {
+      xAxis: { data: x },
+      yAxis: { name: ds.unit },
+      series: [
+        S.line('历史', ds.y.slice(cut - show, cut).concat(new Array(h).fill(null)), { c: 0 }),
+        S.line('实际发生', pad.concat(actual), { c: 0, op: 0.35 }),
+        S.line('模型预测', pad.concat(fc.mean), { c: 1, dash: true }),
+        ...S.band(pad.concat(fc.lo), pad.concat(fc.hi), { c: 1 }),
+      ],
+    });
+    d.out(Site.tiles([
+      ['预测步数', h + (m === 24 ? ' 小时' : ' 天')],
+      ['平均绝对误差 MAE', mt.mae, ds.unit],
+      ['相对误差 WAPE', Site.pct(mt.wape), '误差占实际总量的比例'],
+      ['模型学到的 α / β / γ', [fit.params.alpha, fit.params.beta, fit.params.gamma].map(v => v.toFixed(2)).join(' / '), '第 06 章会讲'],
+    ]));
+  },
+});
+</script>
+</body>
+</html>

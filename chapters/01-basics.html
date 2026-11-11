@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01 认识时间序列 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="01">
+<main>
+<p class="lead">老板问"下个月要备多少货"，运维问"今晚流量会不会打爆机器"，运营问"日活掉了 5% 算不算异常"——这些都是时间序列问题。这一章先建立直觉：时间序列是什么、里面藏着哪几种规律、一个预测任务要先想清楚哪几件事。</p>
+
+<section id="what">
+<h2>什么是时间序列</h2>
+<p><strong>时间序列</strong>就是按时间先后排列的一串观测值：每天的销量、每小时的用电负荷、每分钟的接口响应时间。它和普通表格数据最大的区别只有一条——<strong>顺序本身就是信息</strong>。</p>
+<p>一张用户表，把行打乱没有任何损失；一条销量曲线，把日期打乱就什么都没了。因为今天的值和昨天、上周同一天的值是相关的，这种"自己和过去的自己相关"叫<strong>自相关</strong>，是所有时序模型赖以预测的根本。</p>
+
+<div class="demo" id="shuffle">
+  <div class="demo-title">🧪 实验：把时间顺序打乱，会丢掉什么？</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart"></div>
+    <div class="readout"></div>
+    <p class="hint">点"打乱顺序"：均值、标准差一点没变（它们不关心顺序），但"相邻两天的相关性"直接掉到 0 附近。平均数这类统计量看不见的东西，正是时间序列分析要研究的东西。</p>
+  </div>
+</div>
+</section>
+
+<section id="biz">
+<h2>业务里的时间序列长什么样</h2>
+<p>本教程全程使用下面几份数据（都是按真实规律仿真生成的）。点一下切换，拖动图表下方的滑条可以放大看细节。</p>
+<div class="demo" id="scenes">
+  <div class="demo-title">🧪 业务场景图谱</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="300"></div>
+    <div class="readout"></div>
+  </div>
+</div>
+<div class="callout biz">
+  <div class="hd">💼 同一条曲线，不同部门问的问题不一样</div>
+  <p>销量曲线：<strong>供应链</strong>要未来 2–4 周的日预测来补货；<strong>财务</strong>要未来 12 个月的月预测来做预算；<strong>运营</strong>要知道大促当天比"没有大促会怎样"多卖了多少。问题不同，预测的粒度、步长、评估标准全都不同——所以动手建模前，先把业务问题问清楚。</p>
+</div>
+</section>
+
+<section id="components">
+<h2>四种成分：趋势、季节、周期、噪声</h2>
+<p>看似杂乱的曲线，通常可以拆成几种简单规律的叠加：</p>
+<div class="tw"><table>
+<thead><tr><th>成分</th><th>含义</th><th>业务例子</th></tr></thead>
+<tbody>
+<tr><td><strong>趋势</strong> $T_t$</td><td>长期的上升或下降</td><td>用户规模增长带来的销量上行；老产品逐年萎缩</td></tr>
+<tr><td><strong>季节</strong> $S_t$</td><td><em>固定周期</em>的重复波动</td><td>周末销量高、夏季用电高、午晚高峰</td></tr>
+<tr><td><strong>周期</strong> $C_t$</td><td><em>不固定长度</em>的起伏</td><td>经济景气循环、行业库存周期（通常并入趋势一起处理）</td></tr>
+<tr><td><strong>噪声</strong> $R_t$</td><td>剩下的随机波动</td><td>天气、偶然事件、测量误差——不可预测的部分</td></tr>
+</tbody></table></div>
+<p>此外业务数据里还有两类"不速之客"：<strong>事件</strong>（大促、节假日、发版——已知原因、可提前安排）和<strong>异常</strong>（系统故障、刷单——需要清洗）。第 03 章专门讲怎么区分和处理它们。</p>
+
+<h3>加法模型 vs 乘法模型</h3>
+<p>成分的组合方式有两种：</p>
+$$\text{加法：}\; y_t = T_t + S_t + R_t \qquad\qquad \text{乘法：}\; y_t = T_t \times S_t \times R_t$$
+<p>判断方法很直观：<strong>季节波动的幅度是否随着水平变大而变大</strong>。周末总比平时多卖 200 件（固定差值）是加法；周末总比平时多卖 20%（固定比例）是乘法。业务量在增长的数据，绝大多数是乘法。</p>
+
+<div class="demo" id="synth">
+  <div class="demo-title">🧪 实验：序列合成器——亲手造一条时间序列</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">合成结果（蓝）与其中的趋势（橙）</div>
+    <div class="chart" data-h="260"></div>
+    <div class="chart-cap">季节成分与噪声成分</div>
+    <div class="chart" data-h="180"></div>
+    <p class="hint">试一试：① 把趋势调大再切到"乘法"，观察季节波动如何越来越大（像喇叭口）；② 把噪声拉到最大，规律被淹没——这就是"信噪比低"的数据，任何模型都难预测；③ 把季节幅度调到 0，只剩趋势 + 噪声。</p>
+  </div>
+</div>
+<div class="callout tip">
+  <div class="hd">💡 乘法变加法的小技巧</div>
+  <p>对乘法模型两边取对数：$\log y_t = \log T_t + \log S_t + \log R_t$，就变成了加法。这就是为什么后面很多模型在建模前会先对数据取 $\log$——喇叭口被"压平"了，模型更好学。</p>
+</div>
+</section>
+
+<section id="freq">
+<h2>粒度与重采样</h2>
+<p><strong>粒度</strong>（频率）是相邻两个观测的时间间隔：小时、日、周、月。同一份数据在不同粒度下看到的规律不同，把细粒度聚合成粗粒度叫<strong>重采样</strong>。</p>
+<div class="demo" id="resample">
+  <div class="demo-title">🧪 实验：同一份销量，按日 / 周 / 月看</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart"></div>
+    <div class="readout"></div>
+    <p class="hint">日粒度能看到周内节奏和大促尖峰；聚合到周，周内节奏消失、曲线变平滑；聚合到月，只剩趋势和年度季节。<strong>先别勾选"去掉不完整周期"</strong>，看看月度曲线的最后一个点——如果数据只到月中，这个点会假装"暴跌"。这是报表里最常见的误读之一。</p>
+  </div>
+</div>
+<div class="callout warn">
+  <div class="hd">⚠️ 粒度怎么选</div>
+  <ul>
+    <li><strong>跟着决策走</strong>：按周下采购单，就预测到周；没必要预测到小时再加总。</li>
+    <li><strong>越粗越稳、越细越噪</strong>：聚合会抵消噪声，粗粒度预测通常相对误差更小。</li>
+    <li><strong>聚合前先确认口径</strong>：销量可以求和，价格、库存、日活不能直接求和（要用均值或期末值）。</li>
+  </ul>
+</div>
+</section>
+
+<section id="task">
+<h2>定义一个预测任务</h2>
+<p>"预测销量"不是一个完整的任务描述。下图是每个预测任务都要回答的几件事：</p>
+<svg class="diagram" viewBox="0 0 720 150" role="img" aria-label="预测任务时间轴：历史数据、预测起点、提前期、预测步长">
+  <line class="d-ln" x1="20" y1="80" x2="700" y2="80"/>
+  <rect x="20" y="62" width="380" height="36" rx="6" style="fill:var(--s1);opacity:.18"/>
+  <text class="d-t" x="210" y="85" text-anchor="middle">历史数据（训练用）</text>
+  <line x1="400" y1="40" x2="400" y2="120" style="stroke:var(--ink);stroke-width:2"/>
+  <text class="d-t" x="400" y="32" text-anchor="middle">预测起点（现在）</text>
+  <rect x="400" y="62" width="90" height="36" rx="6" style="fill:var(--muted);opacity:.18"/>
+  <text class="d-m" x="445" y="84" text-anchor="middle">提前期</text>
+  <rect x="490" y="62" width="210" height="36" rx="6" style="fill:var(--s2);opacity:.2"/>
+  <text class="d-t" x="595" y="85" text-anchor="middle">预测步长 h</text>
+  <text class="d-m" x="445" y="118" text-anchor="middle">下单到到货的时间</text>
+  <text class="d-m" x="595" y="118" text-anchor="middle">真正需要预测值的区间</text>
+  <text class="d-m" x="210" y="118" text-anchor="middle">越长越好？不一定——太老的数据可能已不适用</text>
+</svg>
+<div class="tw"><table>
+<thead><tr><th>要回答的问题</th><th>选项</th><th>为什么重要</th></tr></thead>
+<tbody>
+<tr><td>预测什么、什么粒度</td><td>销量 / 销售额；SKU-门店-日 / 品类-周</td><td>粒度越细，序列越多、越稀疏、越难</td></tr>
+<tr><td>预测多远（步长 $h$）</td><td>单步（明天）/ 多步（未来 28 天）</td><td>越远越不准；多步预测有专门的策略（第 08 章）</td></tr>
+<tr><td>要一个数还是一个范围</td><td>点预测 / 区间预测 / 分位数</td><td>备货要的是"有 95% 把握够卖的量"，不是平均值（第 05 章）</td></tr>
+<tr><td>有没有外部信息</td><td>只用自身历史（单变量）/ 加协变量</td><td>促销计划、节假日、天气往往比模型选择更重要</td></tr>
+<tr><td>协变量未来是否已知</td><td>已知未来（日历、促销计划）/ 未知未来（实际天气、竞品动作）</td><td>未来不知道的变量，预测时不能直接用</td></tr>
+<tr><td>预测错了的代价</td><td>缺货 vs 积压；误报 vs 漏报</td><td>决定用什么评估指标、往哪个方向偏更安全</td></tr>
+</tbody></table></div>
+<p>时间序列分析不只有预测。同一套工具还用来做<strong>异常检测</strong>（今天的值正常吗）、<strong>归因分析</strong>（这次下跌是趋势变了还是季节波动）和<strong>效果评估</strong>（活动带来了多少增量）——它们都建立在"先预测出正常情况下应该是多少"的基础上。</p>
+</section>
+
+<section id="workflow">
+<h2>一个预测项目的全流程</h2>
+<p>点击每一步查看要做什么，以及对应本教程的哪一章。</p>
+<div id="flow"></div>
+</section>
+
+<section id="python">
+<h2>Python 里怎么起步</h2>
+<p>pandas 对时间序列有一等公民级别的支持。把时间列设成索引之后，重采样、滚动窗口、按日期切片都是一行代码。</p>
+<details class="code" open><summary>Python 参考代码：读入、设索引、重采样、画图</summary>
+<pre><code>import pandas as pd
+import matplotlib.pyplot as plt
+
+df = pd.read_csv("sales.csv", parse_dates=["date"])
+y = df.set_index("date")["sales"].sort_index()
+
+y = y.asfreq("D")                 # 显式声明日频率：缺失的日期会变成 NaN（第 03 章处理）
+print(y.index.min(), y.index.max(), y.isna().sum())
+
+weekly = y.resample("W-MON", label="left", closed="left").sum()   # 周一为一周的开始
+monthly = y.resample("MS").sum()                                    # 月初为标签
+monthly = monthly.iloc[:-1]       # 最后一个月如果不完整，丢掉它
+
+y["2024-10":"2024-12"].plot(figsize=(10, 3), title="最近三个月")
+y.rolling(7).mean().plot()        # 7 日移动平均（第 02 章）
+plt.show()</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>时间序列 = 按时间排列的观测，<strong>顺序就是信息</strong>；自相关是可预测性的来源。</li>
+  <li>四种成分：趋势、季节（固定周期）、周期（不固定）、噪声；业务数据还要额外识别事件和异常。</li>
+  <li>季节幅度随水平放大 → 乘法模型；取对数可以把乘法变加法。</li>
+  <li>粒度跟着决策走；聚合时注意口径和不完整周期。</li>
+  <li>建模前先定义清楚：预测什么、多细、多远、点还是区间、有什么协变量、错了的代价。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+
+/* ---------- 打乱顺序 ---------- */
+Site.demo('shuffle', {
+  controls: [
+    { act: 'shuffle', label: '🔀 打乱顺序', primary: true, run: s => { s.shuffled = true; s.seed = (s.seed || 0) + 1; } },
+    { act: 'reset', label: '恢复原顺序', run: s => { s.shuffled = false; } },
+  ],
+  render(s, d) {
+    const ds = TS.data.retail(), n = 126, base = ds.y.slice(540, 540 + n); // 2023 年 6 月底起的 18 周，没有大促干扰
+    let y = base.slice();
+    if (s.shuffled) { const r = TS.rng(100 + s.seed); for (let i = n - 1; i > 0; i--) { const j = r.int(0, i); [y[i], y[j]] = [y[j], y[i]]; } }
+    d.chart(0, { xAxis: { data: y.map((_, i) => '第 ' + (i + 1) + ' 天') }, yAxis: { name: '件' }, series: [S.line(s.shuffled ? '打乱后的销量' : '日销量', y, { c: 0 })], legend: false });
+    const ac = TS.acf(y, 7);
+    d.out(Site.tiles([
+      ['均值', TS.mean(y), '不受顺序影响'],
+      ['标准差', TS.std(y), '不受顺序影响'],
+      ['相邻两天的相关性', ac[1].toFixed(2), s.shuffled ? '规律消失了' : '今天像昨天', s.shuffled ? 'bad' : 'good'],
+      ['与 7 天前的相关性', ac[7].toFixed(2), s.shuffled ? '规律消失了' : '周内节奏', s.shuffled ? 'bad' : 'good'],
+    ]));
+  },
+});
+
+/* ---------- 业务场景 ---------- */
+const SCENES = {
+  retail: ['预测未来 2–4 周每天卖多少，决定补多少货', '日', '7–28 天', '预测低了缺货丢销售，高了积压占资金'],
+  load: ['预测明天每小时的用电负荷，安排发电与购电', '小时', '24–168 小时', '低估要高价临时购电甚至限电，高估浪费机组'],
+  dau: ['判断今天的日活是否异常；预测季度末能否达成目标', '日', '1 天（监控）/ 90 天（目标）', '漏报故障损失用户，误报太多没人再看告警'],
+  monthly: ['做下一年度的销售预算与目标分解', '月', '12 个月', '预算偏差影响招聘、采购、现金流计划'],
+  stock: ['（反例）想预测明天的股价涨跌', '日', '1 天', '第 04 章会说明：随机游走几乎不可预测'],
+};
+Site.demo('scenes', {
+  controls: [{ k: 'ds', label: '选择数据', type: 'seg', options: [['retail', '电商销量'], ['load', '电力负荷'], ['dau', 'App 日活'], ['monthly', '月度销售'], ['stock', '股价']] }],
+  render(s, d) {
+    const ds = TS.data[s.ds](), sc = SCENES[s.ds];
+    const ser = S.line(ds.name, ds.y, { c: 0, w: 1.5 });
+    if (ds.event) { // 标出大促与春节
+      const pts = []; ds.event.forEach((e, i) => { if (e === '618' || e === '双11') pts.push({ coord: [i, ds.y[i]], value: e }); });
+      ser.markPoint = { symbol: 'circle', symbolSize: 7, itemStyle: { color: Site.col(1) }, label: { show: true, formatter: p => p.value, position: 'top', color: Site.pal().ink2, fontSize: 11 }, data: pts };
+    }
+    d.chart(0, { xAxis: { data: ds.dates }, yAxis: { name: ds.unit }, series: [ser], legend: false, dataZoom: true });
+    d.out(Site.table(['业务决策', '粒度', '典型预测步长', '预测错了的代价'], [sc]) +
+      `<div class="small muted">共 ${ds.y.length} 个观测，${ds.dates[0]} 至 ${ds.dates[ds.dates.length - 1]}；主要季节周期 = ${ds.period}。</div>`);
+  },
+});
+
+/* ---------- 序列合成器 ---------- */
+Site.demo('synth', {
+  controls: [
+    { k: 'mode', label: '组合方式', type: 'seg', options: [['add', '加法'], ['mul', '乘法']] },
+    { k: 'slope', label: '趋势斜率', min: 0, max: 2, step: 0.1, value: 0.6 },
+    { k: 'amp', label: '季节幅度', min: 0, max: 40, step: 1, value: 15, fmt: v => v + '%' },
+    { k: 'period', label: '季节周期', type: 'select', options: [[7, '7（周）'], [12, '12（年，月度数据）'], [30, '30（月）']], value: 7 },
+    { k: 'noise', label: '噪声大小', min: 0, max: 30, step: 1, value: 5, fmt: v => v + '%' },
+    { act: 'regen', label: '🎲 换一组噪声', run: s => { s.seed = (s.seed || 1) + 1; } },
+  ],
+  render(s, d) {
+    const n = 168, r = TS.rng(40 + (s.seed || 1)), x = [], T = [], Se = [], R = [], y = [];
+    for (let t = 0; t < n; t++) {
+      const tr = 100 + s.slope * t, se = s.amp / 100 * Math.sin(2 * Math.PI * t / s.period), no = s.noise / 100 * r.n();
+      x.push(t + 1); T.push(tr);
+      if (s.mode === 'add') { Se.push(se * 100); R.push(no * 100); y.push(tr + se * 100 + no * 100); }
+      else { Se.push(se * 100); R.push(no * 100); y.push(tr * (1 + se) * (1 + no)); }
+    }
+    d.chart(0, { xAxis: { data: x }, yAxis: {}, series: [S.line('合成的序列 y', y, { c: 0 }), S.line('趋势 T', T, { c: 1, dash: true })] });
+    const unit = s.mode === 'add' ? '（绝对量）' : '（相对趋势的 %）';
+    d.chart(1, { xAxis: { data: x }, yAxis: { name: s.mode === 'add' ? '' : '%' }, series: [S.line('季节 S ' + unit, Se, { c: 2 }), S.line('噪声 R ' + unit, R, { c: 4, w: 1, op: 0.8 })] });
+  },
+});
+
+/* ---------- 重采样 ---------- */
+Site.demo('resample', {
+  controls: [
+    { k: 'unit', label: '粒度', type: 'seg', options: [['day', '日'], ['week', '周'], ['month', '月']], value: 'month' },
+    { k: 'drop', label: '去掉首尾不完整的周期', type: 'check', value: false },
+  ],
+  render(s, d) {
+    const full = TS.data.retail(), cut = TS.dayIndex('2024-12-17') - TS.dayIndex(full.dates[0]) + 1; // 假装数据只到 12 月 17 日
+    const dates = full.dates.slice(2, cut), y = full.y.slice(2, cut);                                   // 从周一(1月3日)开始
+    let X = dates, Y = y, note = '日粒度：' + y.length + ' 个点';
+    if (s.unit !== 'day') {
+      const rs = TS.resample(dates, y, s.unit), fullN = s.unit === 'week' ? 7 : null;
+      let keep = rs.dates.map((_, i) => i);
+      if (s.drop) keep = keep.filter(i => s.unit === 'week' ? rs.n[i] === 7 : !(i === rs.dates.length - 1 && rs.n[i] < 28) && !(i === 0 && rs.n[i] < 28));
+      X = keep.map(i => rs.dates[i]); Y = keep.map(i => rs.y[i]);
+      const last = rs.n[rs.n.length - 1];
+      note = `${s.unit === 'week' ? '周' : '月'}粒度：${Y.length} 个点；最后一个桶里只有 ${last} 天的数据` + (s.drop ? '（已去掉）' : ' ← 所以它看起来"暴跌"');
+    }
+    d.chart(0, { xAxis: { data: X }, yAxis: { name: '件' }, series: [S.line('销量', Y, { c: 0, sym: s.unit === 'month', w: s.unit === 'day' ? 1.2 : 2 })], legend: false });
+    d.out(`<span class="tag">${note}</span>`);
+  },
+});
+
+/* ---------- 全流程 ---------- */
+Site.flow('flow', [
+  { t: '① 明确问题', d: '<p>和业务方对齐：预测什么、粒度、步长、要点预测还是区间、预测错了哪边更疼、多久更新一次。<strong>这一步决定后面所有技术选择</strong>。→ 本章</p>' },
+  { t: '② 取数与对齐', d: '<p>把原始明细聚合成规整的时间序列：时间轴连续、无重复、口径一致。原始表里"某天没有记录"和"某天销量为 0"是两回事。→ <a href="03-cleaning.html">第 03 章</a></p>' },
+  { t: '③ 清洗', d: '<p>处理缺失、异常、缺货截断、口径突变、未到齐的尾部数据。清洗质量往往比模型选择影响更大。→ <a href="03-cleaning.html">第 03 章</a></p>' },
+  { t: '④ 探索', d: '<p>画图、分解、看自相关：有没有趋势？季节周期是多少？加法还是乘法？有哪些事件？→ <a href="02-eda.html">第 02 章</a>、<a href="04-stationarity.html">第 04 章</a></p>' },
+  { t: '⑤ 建基线', d: '<p>先上最简单的方法（比如"和上周同一天一样"）。之后任何复杂模型都必须打败它，否则不值得上线。→ <a href="05-evaluation.html">第 05 章</a></p>' },
+  { t: '⑥ 建模', d: '<p>统计模型（<a href="06-smoothing.html">指数平滑</a>、<a href="07-arima.html">ARIMA</a>）、机器学习（<a href="08-ml.html">GBDT</a>）、深度学习（<a href="10-lstm.html">LSTM</a>、<a href="11-transformer.html">Transformer</a>）。没有永远最好的模型，只有在你的数据上回测最好的模型。</p>' },
+  { t: '⑦ 回测评估', d: '<p>用"滚动起点回测"模拟真实上线后的表现，用贴合业务代价的指标打分。→ <a href="05-evaluation.html">第 05 章</a>、<a href="12-business.html">第 12 章</a></p>' },
+  { t: '⑧ 上线与监控', d: '<p>定期重训、监控预测偏差和数据漂移、保留人工调整入口。预测是一个持续运营的系统，不是一次性的分析。→ <a href="12-business.html">第 12 章</a></p>' },
+]);
+
+Site.quiz('quiz', [
+  { q: '下面哪一项最能说明"时间序列和普通表格数据不同"？', opts: ['时间序列的数据量更大', '时间序列的观测之间按顺序相关，打乱顺序会丢失信息', '时间序列一定有季节性', '时间序列不能有缺失值'], ans: 1, why: '核心区别是自相关：今天的值与过去的值有关。打乱顺序后均值、方差不变，但这种关系消失。' },
+  { q: '某门店销量逐年增长，且每年春节前的销量高峰也一年比一年"更高更尖"。应优先考虑哪种模型？', opts: ['加法模型', '乘法模型', '两者没有区别', '没有季节性'], ans: 1, why: '季节波动的幅度随水平变大而变大，是乘法模型的特征。可以先取对数，把它变成加法结构再建模。' },
+  { q: '你在 12 月 17 日拉取了数据并按月汇总，发现 12 月销量比 11 月"下跌 45%"。最可能的原因是？', opts: ['12 月是淡季', '双 11 透支了需求', '12 月的数据不完整，只有半个月', '模型过拟合'], ans: 2, why: '不完整周期是报表里最常见的误读。聚合前要丢掉首尾不完整的周/月，或换算成日均值。' },
+  { q: '做未来 7 天的销量预测时，下面哪个变量可以直接当作"未来已知"的特征使用？', opts: ['未来 7 天的实际气温', '未来 7 天竞品的实际销量', '未来 7 天是星期几、是否节假日、是否有已排期的促销', '未来 7 天的实际客流量'], ans: 2, why: '日历和已排期的促销计划在预测时就确定了。实际气温、客流在预测那一刻并不知道，只能用它们的预报值或历史值。' },
+]);
+</script>
+</body>
+</html>
