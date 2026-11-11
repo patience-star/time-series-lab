@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>08 机器学习预测 · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="08">
+<main>
+<p class="lead">ARIMA 和指数平滑把规律写死在公式里。机器学习换了一个思路：<strong>把"预测明天"改写成一道普通的表格回归题</strong>——每一行是某一天，列是那一天之前能知道的各种信息（特征），标签是那一天的实际值。之后任何回归模型都能上场，而其中最常胜的是梯度提升树（XGBoost、LightGBM）。这一章讲两件事：特征怎么造，树模型的原理是什么。</p>
+
+<section id="reframe">
+<h2>把序列变成表格：滑动窗口</h2>
+<p>做法很机械：拿一个窗口沿着时间轴滑动，窗口里的值当<strong>特征 X</strong>，窗口后面的值当<strong>标签 y</strong>。每滑一步，生成一行训练样本。</p>
+<div class="demo" id="window-demo">
+  <div class="demo-title">🧪 实验：滑动窗口生成训练样本</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="readout"></div>
+    <p class="hint">蓝色是特征、橙色是标签。点"下一行"让窗口滑动。窗口越长，每行的信息越多，但能生成的样本越少；预测步长大于 1 时，标签离窗口更远——模型学的是"隔几天之后"的关系。</p>
+  </div>
+</div>
+<p>这一步改写带来三个巨大的好处，也正是机器学习方法在业务预测里流行的原因：</p>
+<div class="cards">
+  <div class="card"><h4>① 特征想加就加</h4><p>促销、价格、节假日、天气、库存、竞品……只要预测时能拿到，都可以作为一列。ARIMA 很难做到。</p></div>
+  <div class="card"><h4>② 能学非线性和交互</h4><p>"周末 × 促销"的效果不是两者之和，树模型能自动学到这种交互。</p></div>
+  <div class="card"><h4>③ 一个模型管所有序列</h4><p>把几千个 SKU 的样本堆在一张表里训练一个<strong>全局模型</strong>，序列之间互相借力，新品也能预测。</p></div>
+</div>
+</section>
+
+<section id="features">
+<h2>特征工程：模型的上限由特征决定</h2>
+<div class="tw"><table>
+<thead><tr><th>特征类别</th><th>例子</th><th>作用</th><th>注意</th></tr></thead>
+<tbody>
+<tr><td><strong>滞后</strong></td><td>昨天、7 天前、14 天前的值</td><td>提供"最近水平"和"上周期同位置"</td><td>预测 h 步时，小于 h 的滞后在预测时不可得（要递归或只用 ≥h 的滞后）</td></tr>
+<tr><td><strong>滚动统计</strong></td><td>过去 7/28 天的均值、标准差、最大值</td><td>平滑的水平、波动大小</td><td>窗口必须止于<strong>昨天</strong>，不能包含当天</td></tr>
+<tr><td><strong>日历</strong></td><td>星期几、月份、是否月初/月末、一年中的第几周</td><td>季节规律</td><td>永远是"未来已知"的</td></tr>
+<tr><td><strong>事件</strong></td><td>是否促销、折扣力度、距春节天数、是否发版</td><td>解释尖峰和凹坑</td><td>要用<em>计划</em>值，且计划要靠谱</td></tr>
+<tr><td><strong>周期编码</strong></td><td>$\sin(2\pi k\,t/365)$、$\cos(\cdot)$（傅里叶项）</td><td>平滑的长周期季节</td><td>树模型常用"一年中的第几天"代替</td></tr>
+<tr><td><strong>外部变量</strong></td><td>价格、天气预报、广告投放、库存</td><td>业务驱动因素</td><td>未来值未知的只能用预报或滞后值</td></tr>
+<tr><td><strong>序列属性</strong></td><td>品类、门店、城市、上市天数</td><td>全局模型里区分不同序列</td><td>高基数类别用 LightGBM/CatBoost 的原生类别支持</td></tr>
+</tbody></table></div>
+<div class="demo" id="fe-lab">
+  <div class="demo-title">🧪 特征工程工坊：勾选特征 → 现场训练 → 看效果</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="290"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">特征重要性（按组汇总）</div><div class="chart" data-h="230"></div></div>
+      <div class="readout" style="margin-top:28px"></div>
+    </div>
+    <p class="hint">每次改动都会在浏览器里重新训练一个模型（约 1000 行样本），并对测试段做 28 天的递归预测。建议按这个顺序玩：① 只留"滞后 1"——预测很快变成一条平线；② 加上"滞后 7"和"星期几"——周内节奏出现了；③ 测试时段切到"含一次小促"，再勾选"促销计划"——尖峰被预测到了；④ 切到"含双 11"试试有没有促销特征的区别；⑤ 把特征基本勾全，再把模型切到"岭回归"对比——特征造得好时，简单的线性模型未必输给 GBDT；⑥ 最后勾选"泄漏特征"，看验证误差和真实预测误差如何背道而驰（注意重要性图里那根红色的柱子）。</p>
+  </div>
+</div>
+<div class="callout warn">
+  <div class="hd">⚠️ 数据泄漏：时序特征工程的头号杀手</div>
+  <p>泄漏 = 训练时用了预测时拿不到的信息。它的可怕之处在于：<strong>离线验证指标会变好</strong>，上线后才崩。三种最常见的形态：</p>
+  <ul>
+    <li><strong>特征偷看未来</strong>：<code>rolling(7).mean()</code> 忘了 <code>shift(1)</code>（包含了当天）；居中窗口；用"当日订单数"预测"当日销量"。</li>
+    <li><strong>切分偷看未来</strong>：随机划分训练/验证集（第 05 章）。</li>
+    <li><strong>统计量偷看未来</strong>：用全量数据算均值方差做标准化、算类别的目标编码，然后再切分。</li>
+  </ul>
+  <p>自查方法：对每个特征问一句"<em>站在预测那一刻，这个值我真的已经知道了吗？</em>"；以及警惕重要性异常高的特征。</p>
+</div>
+</section>
+
+<section id="tree">
+<h2>决策树：用一连串"是/否"问题切分数据</h2>
+<p>回归树的想法非常朴素：找一个特征和一个阈值，把数据切成两堆，<strong>让每一堆内部尽量"整齐"</strong>（方差小），然后每一堆用自己的平均值作为预测。切完再对每一堆继续切，直到够深或样本太少为止。</p>
+<p>"整齐"的度量是平方误差。一次切分的好坏用<strong>方差减少量</strong>（增益）衡量：</p>
+$$\text{增益} = \underbrace{\sum_{i}(y_i-\bar y)^2}_{\text{切之前}} - \Big[\underbrace{\sum_{i\in \text{左}}(y_i-\bar y_{左})^2 + \sum_{i\in \text{右}}(y_i-\bar y_{右})^2}_{\text{切之后}}\Big]$$
+<p>树的训练就是：对每个特征的每个候选阈值算一遍增益，选最大的那个。</p>
+<div class="demo" id="split-demo">
+  <div class="demo-title">🧪 实验：亲手找最佳切分点</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">气温 → 用电负荷，以及切分后两侧的均值</div><div class="chart" data-h="250"></div></div>
+      <div><div class="chart-cap">每个候选切分点的增益</div><div class="chart" data-h="250"></div></div>
+    </div>
+    <div class="readout"></div>
+    <p class="hint">拖动切分点：切在 10°C 这种地方，两侧均值差不多，增益很小；把它拖到右图曲线的最高点（绿色圆点）附近，正好把"大量开空调的热天"和其余的日子分开，增益最大。右图就是树在训练时算的东西——它只是比你拖得更快。</p>
+  </div>
+</div>
+<div class="demo" id="depth-demo">
+  <div class="demo-title">🧪 实验：树越深，阶梯越细——直到开始背答案</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">树的预测永远是<strong>阶梯函数</strong>：每个叶子一个常数。深度 1–3 时阶梯逐步逼近真实的弯折形状，测试误差下降；深度继续加大且允许叶子只有 1 个样本时，阶梯开始追逐每一个噪声点——训练误差趋近于 0，测试误差却回升。这就是<strong>过拟合</strong>。"每个叶子至少多少样本"是最有效的刹车之一。</p>
+  </div>
+</div>
+<div class="callout key"><div class="hd">单棵树的优缺点</div>
+<p>优点：不需要特征缩放、天然处理非线性和交互、能解释（一串规则）。缺点：<strong>不稳定</strong>——数据稍微变一点，切分点就可能大变；单棵树要么太浅（欠拟合）要么太深（过拟合）。解决办法是用很多棵树：随机森林和梯度提升。</p></div>
+</section>
+
+<section id="forest">
+<h2>随机森林：很多棵树投票</h2>
+<p>单棵深树的问题是方差大（对训练数据太敏感）。<strong>随机森林</strong>的对策是"人多力量大"：</p>
+<ol>
+  <li><strong>自助采样</strong>（bootstrap）：每棵树用有放回抽样得到的一份略有不同的训练集；</li>
+  <li><strong>随机选特征</strong>：每次切分只在随机抽出的一部分特征里找最佳切分，让树之间更不相像；</li>
+  <li><strong>取平均</strong>：所有树的预测求平均。各棵树的随机误差互相抵消，结果比任何一棵都稳。</li>
+</ol>
+<div class="demo" id="forest-demo">
+  <div class="demo-title">🧪 实验：一棵树 vs 一片森林</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">细线是单棵树的预测，每一棵都歪歪扭扭、各不相同；粗线是它们的平均，随着树的数量增加越来越平滑、越来越接近真实规律。树加到几十棵之后提升就很小了——随机森林<strong>不会因为树多而过拟合</strong>，只是越来越慢。</p>
+  </div>
+</div>
+</section>
+
+<section id="gbdt">
+<h2>梯度提升树（GBDT）：一棵接一棵地纠错</h2>
+<p>随机森林的树是<strong>并行、独立</strong>地种的。梯度提升换了一种组织方式——<strong>串行</strong>：每一棵新树专门去学前面所有树<strong>还没学会的部分</strong>（残差）。</p>
+$$F_0(x)=\bar y,\qquad r_i = y_i - F_{m-1}(x_i),\qquad h_m \leftarrow \text{用一棵浅树拟合 } r,\qquad F_m(x)=F_{m-1}(x)+\eta\,h_m(x)$$
+<ul>
+  <li>$F_0$：从最朴素的预测（均值）开始；</li>
+  <li>$r_i$：当前模型在每个样本上的<strong>残差</strong>——还差多少；</li>
+  <li>$h_m$：种一棵<strong>很浅</strong>的树去预测这些残差；</li>
+  <li>$\eta$：<strong>学习率</strong>（如 0.1）——每棵树的修正只采纳一小部分，宁可多走几步，不要一步迈太大。</li>
+</ul>
+<p>为什么叫"梯度"提升？因为对平方损失 $\tfrac12(y-F)^2$，残差 $y-F$ 恰好是损失对 $F$ 的负梯度。换成别的损失函数（绝对值、分位数），就让新树去拟合那个损失的负梯度——所以它是"在函数空间里做梯度下降"。</p>
+<div class="demo" id="boost-demo">
+  <div class="demo-title">🧪 实验：看 GBDT 一轮一轮地逼近</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="grid2">
+      <div><div class="chart-cap">当前模型 F<sub>m</sub></div><div class="chart" data-h="240"></div></div>
+      <div><div class="chart-cap">当前残差，以及下一棵树对残差的拟合</div><div class="chart" data-h="240"></div></div>
+    </div>
+    <div class="chart-cap">训练误差与测试误差随轮数的变化</div>
+    <div class="chart" data-h="170"></div>
+    <div class="readout"></div>
+    <p class="hint">把轮数拖回 0 再点"播放"。第 0 轮是一条水平线（均值）；右图的残差有明显形状，下一棵树（橙色阶梯）学的就是这个形状；加上去之后残差变小、变得更没规律。几十轮之后残差只剩噪声。再把学习率切到 1：前几轮就拟合得很猛，但测试误差很快掉头向上——<strong>学习率小 + 轮数多 + 早停</strong>是标准配方。</p>
+  </div>
+</div>
+
+<h3>XGBoost、LightGBM、CatBoost：同一个思想的三种工程实现</h3>
+<div class="tw"><table>
+<thead><tr><th></th><th>XGBoost</th><th>LightGBM</th><th>CatBoost</th></tr></thead>
+<tbody>
+<tr><td><strong>核心改进</strong></td><td>目标函数加入<strong>正则项</strong>（叶子数、叶子权重的 L2）；用损失的<strong>一阶和二阶导数</strong>来计算叶子值和增益</td><td><strong>直方图算法</strong>：特征先分桶，找切分只扫桶；<strong>按叶子生长</strong>（每次分裂增益最大的叶子）</td><td><strong>有序提升</strong>避免目标泄漏；对称树；类别特征的有序目标编码</td></tr>
+<tr><td><strong>速度</strong></td><td>快（也有直方图模式）</td><td>最快，内存最省</td><td>训练较慢，预测很快</td></tr>
+<tr><td><strong>类别特征</strong></td><td>需编码（新版有原生支持）</td><td>原生支持</td><td>最强项</td></tr>
+<tr><td><strong>容易踩的坑</strong></td><td>参数多</td><td>按叶子生长易过拟合：要限制 <code>num_leaves</code>、<code>min_data_in_leaf</code></td><td>默认参数就不错，但慢</td></tr>
+<tr><td><strong>时序预测里</strong></td><td>常用</td><td><strong>最常用</strong>（M5 等预测竞赛的冠军方案主力）</td><td>类别特征多时值得试</td></tr>
+</tbody></table></div>
+<details class="code"><summary>原理补充：XGBoost 的"二阶 + 正则"到底改了什么</summary>
+<pre><code>GBDT（本页实现）：叶子值 = 落在该叶子里的残差的平均值
+                  增益   = 方差减少量
+
+XGBoost：对任意损失函数 L，在当前预测处做二阶泰勒展开，
+         记 g_i = 一阶导数（梯度），h_i = 二阶导数（海森），则
+
+         叶子的最优值  w* = − Σg_i / (Σh_i + λ)
+         切分的增益    = ½ [ GL²/(HL+λ) + GR²/(HR+λ) − (GL+GR)²/(HL+HR+λ) ] − γ
+
+         λ：L2 正则，让叶子值向 0 收缩（样本少的叶子不敢给太大的修正）
+         γ：每多一个叶子要付的"门槛费"，增益不够就不切
+
+平方损失时 g_i = −残差，h_i = 1，λ=0、γ=0 就退化成上面的 GBDT。
+好处：① 换损失函数不用重新推导；② 正则直接写进了切分准则里。
+
+LightGBM 的直方图：把每个特征的取值预先分成 ≤255 个桶，
+         找切分时不再遍历所有取值，只遍历桶 → 速度提升一个数量级。
+         （本页面的树就是这样实现的，用了 32 个桶）</code></pre></details>
+<div class="tw"><table>
+<thead><tr><th>超参数（LightGBM 名称）</th><th>作用</th><th>经验</th></tr></thead>
+<tbody>
+<tr><td><code>learning_rate</code> + <code>n_estimators</code></td><td>每棵树的步长、树的数量</td><td>学习率 0.03–0.1；树的数量用<strong>早停</strong>在按时间切分的验证集上自动确定</td></tr>
+<tr><td><code>num_leaves</code> / <code>max_depth</code></td><td>单棵树的复杂度</td><td>从 31 / 不限开始；数据少就调小</td></tr>
+<tr><td><code>min_data_in_leaf</code></td><td>叶子最少样本数</td><td>时序数据噪声大，常设 20–200</td></tr>
+<tr><td><code>feature_fraction</code>、<code>bagging_fraction</code></td><td>每棵树随机用一部分特征/样本</td><td>0.7–0.9，降低过拟合</td></tr>
+<tr><td><code>objective</code></td><td>损失函数</td><td><code>regression</code>（L2）、<code>regression_l1</code>、<code>quantile</code>（分位数预测）、<code>tweedie</code>（大量 0 的间歇需求）</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="extrap">
+<h2>树模型的致命弱点：不会外推</h2>
+<p>树的预测是叶子里训练样本的平均值，所以它<strong>永远给不出比训练集里见过的最大值更大的预测</strong>。业务量在增长时，这是个大问题。</p>
+<div class="demo" id="extrap-demo">
+  <div class="demo-title">🧪 实验：持续上涨的序列，GBDT 撞上天花板</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="280"></div>
+    <div class="readout"></div>
+    <p class="hint">默认设置下，预测在训练集的最高水平附近"撞墙"，只会重复季节形状，完全跟不上趋势。勾选"预测相对变化"后，目标和滞后特征都改成"相对最近 7 天均值的差"——模型学的不再是"水平是多少"，而是"比最近的水平高或低多少"，这在任何水平上都成立，于是趋势回来了。</p>
+  </div>
+</div>
+<div class="callout tip"><div class="hd">💡 让树模型跟上趋势的常用办法</div>
+<ul>
+  <li><strong>改目标</strong>：预测差分、增长率、或"相对最近均值的比例"（上面实验的做法），预测完再还原。</li>
+  <li><strong>先去趋势</strong>：用线性模型或指数平滑拟合趋势，树模型只学残差（"线性 + 树"的混合）。</li>
+  <li><strong>相对化特征</strong>：滞后值除以滚动均值，让特征和目标都与水平无关。</li>
+  <li>目标取对数只能把指数增长变成线性增长，<strong>不能单独解决外推问题</strong>。</li>
+</ul></div>
+</section>
+
+<section id="multistep">
+<h2>多步预测的策略</h2>
+<p>模型一次只输出一个数，但业务要未来 28 天。怎么办？</p>
+<div class="tw"><table>
+<thead><tr><th>策略</th><th>做法</th><th>优点</th><th>缺点</th></tr></thead>
+<tbody>
+<tr><td><strong>递归</strong></td><td>训练一个"预测下一步"的模型；预测出来的值当作已知，再预测下一步</td><td>只需一个模型；能用最近的滞后</td><td>误差逐步累积，越远越差</td></tr>
+<tr><td><strong>直接</strong></td><td>每个步长训练一个模型（或只使用 ≥h 天前的信息）</td><td>没有误差累积</td><td>模型多；用不上最近几天的信息</td></tr>
+<tr><td><strong>多输出</strong></td><td>一个模型同时输出 h 个值</td><td>各步之间保持一致</td><td>树模型不直接支持，神经网络常用（第 10 章）</td></tr>
+</tbody></table></div>
+<div class="demo" id="ms-demo">
+  <div class="demo-title">🧪 实验：预测得越远，误差越大吗？</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="270"></div>
+    <div class="readout"></div>
+    <p class="hint">这是在 8 个不同时间点回测、按"提前几天预测"汇总的平均误差。递归法在前几天最准（它用到了昨天的真实值），但误差随步长上升；"直接法"只用 28 天前及更早的信息，短期不如递归，但误差不随步长恶化。实践中常把两者结合：近期用递归，远期用直接。</p>
+  </div>
+</div>
+</section>
+
+<section id="global">
+<h2>全局模型、Prophet，以及什么时候用机器学习</h2>
+<h3>全局模型</h3>
+<p>传统方法给每条序列各建一个模型（局部模型）。机器学习的典型用法是把<strong>所有序列的样本堆进一张表</strong>，加上"品类、门店、城市"等属性列，训练一个模型。好处：数据量大了几个数量级；相似商品互相借力；新品没有历史也能靠属性预测。要点：</p>
+<ul>
+  <li><strong>尺度归一</strong>：不同序列量级差几千倍，要把目标和滞后特征除以各自的平均水平（或取对数、预测相对变化）。</li>
+  <li><strong>验证仍按时间切分</strong>，所有序列用同一个时间点切。</li>
+  <li>评估用 WAPE / MASE 这类跨序列可比的指标。</li>
+</ul>
+<h3>Prophet 是什么</h3>
+<p>Prophet 是一个流行的预测库，它的模型是 $y(t) = g(t) + s(t) + h(t) + \varepsilon$：分段线性的趋势 $g$、用傅里叶项表示的季节 $s$、节假日效应 $h$。本质上是一个<strong>精心设计了特征的加法回归模型</strong>——没有滞后项，完全靠"时间"和"日历"来解释数据。优点是上手快、对缺失和异常宽容、能方便地加节假日；缺点是不利用近期的自相关，短期预测精度常常不如带滞后特征的模型或 ETS/ARIMA。适合做有强节假日效应的中长期预测和快速基线。</p>
+<div class="tw"><table>
+<thead><tr><th>情况</th><th>更适合</th></tr></thead>
+<tbody>
+<tr><td>单条序列、数据不长、没有外部变量</td><td>ETS / ARIMA（第 06、07 章）</td></tr>
+<tr><td>有促销、价格、天气等驱动因素</td><td><strong>GBDT + 特征工程</strong></td></tr>
+<tr><td>成百上千条相关序列</td><td><strong>全局 GBDT</strong>（或深度学习，第 10–11 章）</td></tr>
+<tr><td>需要严格的统计推断和可解释系数</td><td>ARIMAX / 回归</td></tr>
+<tr><td>有强趋势需要外推</td><td>统计模型，或"去趋势 + GBDT"</td></tr>
+</tbody></table></div>
+<details class="code" open><summary>Python 参考代码：特征工程 + LightGBM + 时间切分验证 + 递归预测</summary>
+<pre><code>import numpy as np, pandas as pd, lightgbm as lgb
+
+def make_features(df):                      # df: 索引为日期，列 [y, promo, is_holiday]
+    f = pd.DataFrame(index=df.index)
+    ly = np.log1p(df["y"])
+    for k in (1, 7, 14, 28):
+        f[f"lag{k}"] = ly.shift(k)
+    past = ly.shift(1)                      # 关键：先 shift(1)，窗口才不包含当天
+    for w in (7, 28):
+        f[f"mean{w}"] = past.rolling(w).mean()
+        f[f"std{w}"]  = past.rolling(w).std()
+    f["dow"], f["month"] = df.index.dayofweek, df.index.month
+    f["promo"], f["holiday"] = df["promo"], df["is_holiday"]      # 未来已知的计划
+    return f, ly
+
+X, ly = make_features(df)
+ok = X.notna().all(axis=1)
+X, ly = X[ok], ly[ok]
+
+cut = X.index[-56]                          # 按时间切分：最后 8 周做验证
+Xtr, ytr, Xva, yva = X[X.index &lt; cut], ly[ly.index &lt; cut], X[X.index &gt;= cut], ly[ly.index &gt;= cut]
+
+model = lgb.LGBMRegressor(n_estimators=2000, learning_rate=0.05, num_leaves=31,
+                          min_child_samples=30, subsample=0.8, subsample_freq=1,
+                          colsample_bytree=0.8, objective="regression")
+model.fit(Xtr, ytr, eval_set=[(Xva, yva)], eval_metric="l1",
+          categorical_feature=["dow", "month"],
+          callbacks=[lgb.early_stopping(100), lgb.log_evaluation(200)])
+
+imp = pd.Series(model.feature_importances_, X.columns).sort_values(ascending=False)
+print(imp.head(10))                         # 某个特征高得离谱？先怀疑泄漏
+
+# 递归多步预测 + 滚动回测 + 多序列，推荐直接用 mlforecast：
+from mlforecast import MLForecast
+from mlforecast.lag_transforms import RollingMean
+fcst = MLForecast(models=[lgb.LGBMRegressor(n_estimators=500, learning_rate=0.05)],
+                  freq="D", lags=[1, 7, 14, 28],
+                  lag_transforms={1: [RollingMean(7), RollingMean(28)]},
+                  date_features=["dayofweek", "month"])
+cv = fcst.cross_validation(long_df, h=28, n_windows=6, static_features=[])   # 自动防泄漏的回测
+# 分位数预测（给补货用）：LGBMRegressor(objective="quantile", alpha=0.9)</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>滑动窗口把预测变成表格回归；滞后、滚动、日历、事件是四类基本特征。</li>
+  <li>每个特征都要问：预测那一刻真的已经知道了吗？泄漏会让验证变好、上线变差。</li>
+  <li>回归树 = 反复寻找方差减少量最大的切分；预测是阶梯函数；深了会过拟合。</li>
+  <li>随机森林：并行种很多树取平均，降方差。GBDT：串行地让每棵浅树拟合残差，小学习率 + 早停。</li>
+  <li>XGBoost 加了二阶信息和正则；LightGBM 用直方图和按叶子生长，速度最快。</li>
+  <li>树模型不会外推趋势——预测相对变化或先去趋势。</li>
+  <li>多步预测：递归会累积误差，直接法不会但用不上最新信息。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/mllib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+const RT = TS.data.retail();
+
+/* ---------- 滑动窗口 ---------- */
+Site.demo('window-demo', {
+  controls: [
+    { k: 'w', label: '窗口长度（用过去几天）', min: 1, max: 7, step: 1, value: 3 },
+    { k: 'h', label: '预测步长（预测几天后）', min: 1, max: 4, step: 1, value: 1 },
+    { act: 'next', label: '下一行 ▶', primary: true, run: s => { s.pos = (s.pos || 0) + 1; } },
+    { act: 'reset', label: '回到开头', run: s => { s.pos = 0; } },
+  ],
+  render(s, d) {
+    const y = RT.y.slice(976, 990), n = y.length, total = n - s.w - s.h + 1, pos = (s.pos || 0) % total;
+    const cell = (v, i) => { const inX = i >= pos && i < pos + s.w, isY = i === pos + s.w + s.h - 1;
+      return `<span style="display:inline-block;min-width:46px;margin:2px;padding:4px 6px;border-radius:8px;text-align:center;font-variant-numeric:tabular-nums;font-size:.86rem;border:1px solid var(--line);${inX ? 'background:var(--accent-bg);border-color:var(--s1);color:var(--accent-ink);font-weight:650' : isY ? 'background:color-mix(in srgb,var(--s2) 22%,var(--surface));border-color:var(--s2);font-weight:650' : 'color:var(--muted)'}">${v}</span>`; };
+    const rows = []; for (let p = Math.max(0, pos - 3); p <= pos; p++) rows.push([p + 1].concat(y.slice(p, p + s.w), [`<b>${y[p + s.w + s.h - 1]}</b>`]));
+    d.out(`<div class="chart-cap">连续 ${n} 天的销量</div><div>${y.map(cell).join('')}</div>` +
+      `<div class="chart-cap">生成的训练样本（第 ${pos + 1} / ${total} 行）</div>` +
+      Site.table(['行'].concat(Array.from({ length: s.w }, (_, k) => 'x：' + (s.w - k + s.h - 1) + ' 天前'), ['y：标签']), rows, { num: Array.from({ length: s.w + 1 }, (_, k) => k + 1), hl: rows.length - 1 }) +
+      `<div class="small muted">${n} 个数据点、窗口 ${s.w}、步长 ${s.h} → 共可生成 ${total} 行样本。</div>`);
+  },
+});
+
+/* ---------- 特征工程工坊 ---------- */
+const FEATS = [['lag1', '滞后 1', 1], ['lag7', '滞后 7', 0], ['lag14', '滞后 14/21/28', 0], ['roll', '滚动均值 7/28', 0], ['std', '滚动波动 7', 0], ['dow', '星期几', 0], ['month', '月份 + 年周期', 0], ['promo', '促销计划', 0], ['holiday', '春节', 0]];
+const buildCfg = (f, model) => {
+  const c = { log: true, lags: [], roll: [], rollStd: [], onehot: model === 'ridge' };
+  if (f.lag1) c.lags.push(1); if (f.lag7) c.lags.push(7); if (f.lag14) c.lags.push(14, 21, 28);
+  if (f.roll) c.roll = [7, 28]; if (f.std) c.rollStd = [7];
+  c.dow = f.dow; if (f.month) { c.month = true; c.fourier = 2; } c.promo = f.promo; c.holiday = f.holiday;
+  return c;
+};
+const fitModel = (X, y, model) => (model === 'ridge' ? ML.ridge(X, y, 1) : ML.gbdt(X, y, { nTrees: 150, lr: 0.08, maxDepth: 4, minLeaf: 8 }));
+Site.demo('fe-lab', {
+  controls: [
+    { k: 'f', type: 'checks', label: '选择特征', options: FEATS },
+    { k: 'model', label: '模型', type: 'seg', options: [['gbdt', 'GBDT'], ['ridge', '岭回归（线性）']] },
+    { k: 'cut', label: '测试时段', type: 'seg', options: [[976, '平常的 4 周'], [990, '含一次小促'], [1036, '含双 11']] },
+    { k: 'leak', label: '⚠️ 加入泄漏特征：居中 3 日均值（包含当天和明天）', type: 'check', value: false },
+  ],
+  render(s, d) {
+    const cfg = buildCfg(s.f, s.model), cut = s.cut, h = 28, p = Site.pal();
+    if (s.leak) cfg.leak = true;
+    if (!ML.featNames(cfg).length) { d.out('<span class="tag bad">至少选一个特征</span>'); return; }
+    const t0 = performance.now(), tr = ML.makeXY(RT, cfg, 0, cut, true), model = fitModel(tr.X, tr.y, s.model), ms = performance.now() - t0;
+    const actual = RT.y.slice(cut, cut + h), fc = ML.forecast(model, RT, cfg, cut, h), sn = TS.fc.snaive(RT.y.slice(0, cut), h, 7);
+    const v0 = cut - 42, pad = new Array(42).fill(null);
+    const act = S.line('实际', pad.concat(actual), { c: 0, op: 0.45 });
+    const ev = []; for (let j = 0; j < h; j++) if (RT.promo[cut + j]) ev.push(cut + j);
+    if (ev.length) act.markArea = S.areas([[RT.dates[ev[0]], RT.dates[ev[ev.length - 1]], '促销期', 3]]);
+    d.chart(0, { xAxis: { data: RT.dates.slice(v0, cut + h) }, yAxis: { name: '件' },
+      series: [S.line('训练数据', RT.y.slice(v0, cut).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }), act, S.line('季节朴素', pad.concat(sn), { c: p.muted, dash: true, w: 1.2 }), S.line('模型预测（递归 28 步）', pad.concat(fc.map(Math.round)), { c: 1, w: 2.5 })] });
+    const gi = ML.groupImportance(model.importance, tr.names).reverse();
+    d.chart(1, { xAxis: { type: 'value', axisLabel: { formatter: v => Math.round(v * 100) + '%' } }, yAxis: { type: 'category', data: gi.map(e => e[0]), splitLine: { show: false } }, legend: false, grid: { left: 6, right: 20, top: 6, bottom: 6 },
+      tooltip: { trigger: 'item', formatter: q => q.name + '：' + Site.pct(q.value) },
+      series: [{ type: 'bar', name: '重要性', data: gi.map(e => ({ value: +e[1].toFixed(4), itemStyle: { color: /泄漏/.test(e[0]) ? p.crit : p.s[0], borderRadius: 2 } })), barMaxWidth: 18 }] });
+    const m = TS.metrics(actual, fc), m0 = TS.metrics(actual, sn), one = TS.metrics(actual, ML.oneStep(model, RT, cfg, cut, cut + h, s.leak));
+    const tiles = [
+      ['真实预测 MAE（递归 28 步）', m.mae, 'WAPE ' + Site.pct(m.wape), m.mae < m0.mae ? 'good' : 'bad'],
+      ['季节朴素法 MAE', m0.mae, '基线'],
+      [s.leak ? '验证 MAE（特征偷看了答案）' : '一步预测 MAE（每天只预测明天）', one.mae, s.leak ? '看起来很美 ← 上线后拿不到' : '用到了昨天的真实值，所以更低', s.leak ? 'bad' : ''],
+      ['样本 × 特征', tr.X.length + ' × ' + tr.names.length, '训练耗时 ' + Math.round(ms) + ' ms'],
+    ];
+    d.out(Site.tiles(tiles));
+  },
+});
+
+/* ---------- 一维数据：气温 → 负荷 ---------- */
+const TEMP = (() => {
+  const r = TS.rng(5), all = [];
+  for (let i = 0; i < 170; i++) { const x = +(8 + 30 * r()).toFixed(1); all.push([x, Math.round(3000 + 85 * Math.max(0, x - 24) + 25 * Math.max(0, 14 - x) + 70 * r.n())]); }
+  const tr = all.slice(0, 110), te = all.slice(110), grid = []; for (let x = 8; x <= 38; x += 0.2) grid.push(+x.toFixed(1));
+  return { tr, te, grid, X: tr.map(q => [q[0]]), y: tr.map(q => q[1]), truth: x => 3000 + 85 * Math.max(0, x - 24) + 25 * Math.max(0, 14 - x) };
+})();
+const maeOn = (pts, f) => TS.mean(pts.map(q => Math.abs(f([q[0]]) - q[1])));
+const valueAxis = { type: 'value', min: 8, max: 38, name: '气温 °C', nameLocation: 'middle', nameGap: 22, scale: false };
+const stepLine = (name, f, o) => Object.assign(S.line(name, TEMP.grid.map(x => [x, Math.round(f([x]))]), o), { step: false });
+
+Site.demo('split-demo', {
+  controls: [{ k: 'thr', label: '切分点（气温）', min: 9, max: 37, step: 0.5, value: 15, fmt: v => v + ' °C' }],
+  render(s, d) {
+    const pts = TEMP.tr, tot = TS.variance(TEMP.y) * pts.length, p = Site.pal();
+    const gainAt = t => { const L = pts.filter(q => q[0] <= t).map(q => q[1]), R = pts.filter(q => q[0] > t).map(q => q[1]); if (!L.length || !R.length) return { g: 0, mL: 0, mR: 0 }; return { g: tot - TS.variance(L) * L.length - TS.variance(R) * R.length, mL: TS.mean(L), mR: TS.mean(R), nL: L.length, nR: R.length }; };
+    const cur = gainAt(s.thr), xs = []; for (let t = 9; t <= 37; t += 0.5) xs.push(t);
+    const gains = xs.map(t => gainAt(t).g / tot), bi = gains.indexOf(Math.max(...gains));
+    const sc = S.scatter('训练样本', pts, { c: 0, size: 6, op: 0.6, ring: false }); sc.markLine = S.vline(s.thr, { c: p.s[1] });
+    d.chart(0, { xAxis: valueAxis, yAxis: { name: 'MW' }, legend: false, tooltip: false,
+      series: [sc, S.line('左侧均值', [[8, cur.mL], [s.thr, cur.mL]], { c: 1, w: 3 }), S.line('右侧均值', [[s.thr, cur.mR], [38, cur.mR]], { c: 1, w: 3 })] });
+    const gs = S.line('增益', xs.map((t, i) => [t, +(gains[i] * 100).toFixed(1)]), { c: 6, w: 2 });
+    gs.markLine = S.vline(s.thr, { c: p.s[1] });
+    gs.markPoint = { symbol: 'circle', symbolSize: 10, itemStyle: { color: p.good }, label: { show: true, formatter: '最佳', position: 'top', color: p.ink2, fontSize: 11 }, data: [{ coord: [xs[bi], +(gains[bi] * 100).toFixed(1)] }] };
+    d.chart(1, { xAxis: valueAxis, yAxis: { name: '方差减少 %', scale: false }, legend: false, tooltip: false, series: [gs] });
+    d.out(Site.tiles([
+      ['左侧（≤ ' + s.thr + '°C）', Math.round(cur.mL) + ' MW', cur.nL + ' 个样本的均值'], ['右侧（> ' + s.thr + '°C）', Math.round(cur.mR) + ' MW', cur.nR + ' 个样本的均值'],
+      ['这次切分消除的方差', Site.pct(cur.g / tot, 0), '占总方差', cur.g / tot > 0.9 * gains[bi] ? 'good' : ''], ['最佳切分点', xs[bi] + ' °C', '消除 ' + Site.pct(gains[bi], 0)],
+    ]));
+  },
+});
+
+Site.demo('depth-demo', {
+  controls: [
+    { k: 'depth', label: '树的最大深度', min: 0, max: 8, step: 1, value: 1 },
+    { k: 'leaf', label: '每个叶子至少多少样本', type: 'seg', options: [[1, '1（不限制）'], [5, '5'], [15, '15']] },
+  ],
+  render(s, d) {
+    const t = ML.tree(TEMP.X, TEMP.y, { maxDepth: s.depth, minLeaf: s.leaf, maxBins: 120 }), p = Site.pal();
+    d.chart(0, { xAxis: valueAxis, yAxis: { name: 'MW' }, tooltip: false,
+      series: [S.scatter('训练样本', TEMP.tr, { c: 0, size: 6, op: 0.55, ring: false }), S.scatter('测试样本', TEMP.te, { c: 3, size: 6, op: 0.8, ring: false }),
+        S.line('真实规律', TEMP.grid.map(x => [x, TEMP.truth(x)]), { c: p.muted, dash: true, w: 1.2 }), stepLine('树的预测', t.predict, { c: 1, w: 2.5 })] });
+    const a = maeOn(TEMP.tr, t.predict), b = maeOn(TEMP.te, t.predict);
+    d.out(Site.tiles([['叶子数', ML.leaves(t.root), '阶梯的级数'], ['训练集 MAE', a, 'MW'], ['测试集 MAE', b, 'MW', b > a * 1.6 ? 'bad' : 'good'], ['测试 ÷ 训练', (b / Math.max(a, 1e-9)).toFixed(1) + ' 倍', b > a * 1.6 ? '差距大 → 过拟合' : '差距小']]));
+  },
+});
+
+Site.demo('forest-demo', {
+  controls: [{ k: 'n', label: '树的数量', min: 1, max: 80, step: 1, value: 1 }],
+  setup(s) { s.rf = ML.forest(TEMP.X, TEMP.y, { nTrees: 80, maxDepth: 8, minLeaf: 2, featFrac: 1, maxBins: 120, seed: 3 }); },
+  render(s, d) {
+    const rf = s.rf, p = Site.pal(), series = [S.scatter('训练样本', TEMP.tr, { c: 0, size: 5, op: 0.4, ring: false })];
+    for (let m = 0; m < Math.min(s.n, 8); m++) series.push(S.line('第 ' + (m + 1) + ' 棵树', TEMP.grid.map(x => [x, Math.round(rf.predictTree([x], m))]), { c: p.s[0], w: 1, op: 0.3 }));
+    series.push(S.line('真实规律', TEMP.grid.map(x => [x, TEMP.truth(x)]), { c: p.muted, dash: true, w: 1.2 }), S.line(s.n + ' 棵树的平均', TEMP.grid.map(x => [x, Math.round(rf.predictK([x], s.n))]), { c: 1, w: 3 }));
+    d.chart(0, { xAxis: valueAxis, yAxis: { name: 'MW' }, legend: false, tooltip: false, series });
+    const e1 = maeOn(TEMP.te, r => rf.predictTree(r, 0)), eN = maeOn(TEMP.te, r => rf.predictK(r, s.n));
+    d.out(Site.tiles([['单棵树的测试 MAE', e1, 'MW'], [s.n + ' 棵树平均后的测试 MAE', eN, 'MW', eN < e1 ? 'good' : ''], ['误差降低', Site.pct(1 - eN / e1, 0)]]));
+  },
+});
+
+/* ---------- GBDT 逐轮 ---------- */
+Site.demo('boost-demo', {
+  controls: [
+    { k: 'm', label: '已完成的轮数（树的数量）', min: 0, max: 120, step: 1, value: 3 },
+    { k: 'lr', label: '学习率 η', type: 'seg', options: [[0.05, '0.05'], [0.1, '0.1'], [0.3, '0.3'], [1, '1']], value: 0.3 },
+    { k: 'depth', label: '每棵树的深度', type: 'seg', options: [[1, '1'], [2, '2'], [4, '4']], value: 2 },
+    { act: 'play', label: '▶ 播放', primary: true, run(s, d) { if (s.m >= 120) d.set('m', 0); d.loop('play', () => { d.set('m', s.m + 1); d.draw(); return s.m < 120; }, 90); return false; } },
+  ],
+  render(s, d) {
+    const key = s.lr + '_' + s.depth, p = Site.pal();
+    if (!s.cache || s.cache.key !== key) s.cache = { key, gb: ML.gbdt(TEMP.X, TEMP.y, { nTrees: 121, lr: s.lr, maxDepth: s.depth, minLeaf: 2, maxBins: 120, valid: { X: TEMP.te.map(q => [q[0]]), y: TEMP.te.map(q => q[1]) } }) };
+    const gb = s.cache.gb, F = r => gb.predictK(r, s.m), next = gb.trees[s.m];
+    d.chart(0, { xAxis: valueAxis, yAxis: { name: 'MW' }, legend: false, tooltip: false,
+      series: [S.scatter('训练样本', TEMP.tr, { c: 0, size: 6, op: 0.5, ring: false }), stepLine('当前模型', F, { c: 1, w: 2.5 })] });
+    const res = TEMP.tr.map(q => [q[0], Math.round(q[1] - F([q[0]]))]);
+    const zero = S.line('0', [[8, 0], [38, 0]], { c: p.muted, w: 1 });
+    d.chart(1, { xAxis: valueAxis, yAxis: { name: '残差 MW' }, legend: false, tooltip: false,
+      series: [S.scatter('残差', res, { c: 6, size: 6, op: 0.6, ring: false }), zero, S.line('下一棵树', TEMP.grid.map(x => [x, Math.round(ML.walk(next, [x]))]), { c: 1, w: 2.5 })] });
+    const rm = a => a.map(v => +Math.sqrt(v).toFixed(1)), xs = Array.from({ length: 121 }, (_, i) => i);
+    const base = Math.sqrt(TS.variance(TEMP.y)), baseV = Math.sqrt(TS.mean(TEMP.te.map(q => (q[1] - gb.base) ** 2)));
+    const trL = [+base.toFixed(1)].concat(rm(gb.trainLoss)).slice(0, 121), vaL = [+baseV.toFixed(1)].concat(rm(gb.validLoss)).slice(0, 121);
+    const lt = S.line('训练 RMSE', trL, { c: 0 }); lt.markLine = S.vline(String(s.m), { c: p.s[1] });
+    d.chart(2, { xAxis: { data: xs.map(String), name: '轮数', nameLocation: 'middle', nameGap: 22 }, yAxis: { name: 'MW', scale: false }, series: [lt, S.line('测试 RMSE', vaL, { c: 3 })] });
+    const bestM = vaL.indexOf(Math.min(...vaL));
+    d.out(Site.tiles([['第 ' + s.m + ' 轮 · 训练 RMSE', trL[s.m]], ['第 ' + s.m + ' 轮 · 测试 RMSE', vaL[s.m], '', s.m > bestM + 15 && vaL[s.m] > vaL[bestM] * 1.03 ? 'bad' : ''], ['测试误差最低出现在', '第 ' + bestM + ' 轮', 'RMSE ' + vaL[bestM] + ' ← 早停应该停在这里', 'good'], ['噪声水平（理论下限）', 70, '数据里加的噪声标准差']]));
+  },
+});
+
+/* ---------- 外推 ---------- */
+Site.demo('extrap-demo', {
+  controls: [{ k: 'rel', label: '改为预测"相对最近 7 天均值的变化"', type: 'check', value: false }],
+  setup(s) { const n = 300, r = TS.rng(8); s.ds = { y: Array.from({ length: n }, (_, i) => +(100 + 2 * i + 25 * Math.sin(2 * Math.PI * i / 7) + 8 * r.n()).toFixed(1)), dates: TS.dates('2023-01-01', n) }; },
+  render(s, d) {
+    const ds = s.ds, cut = 220, h = 80, cfg = { lags: [1, 7, 14], dow: true, rel: s.rel }, tr = ML.makeXY(ds, cfg, 0, cut);
+    const fc = ML.forecast(ML.gbdt(tr.X, tr.y, { nTrees: 150, lr: 0.1, maxDepth: 3, minLeaf: 3 }), ds, cfg, cut, h), pad = new Array(cut - 100).fill(null), mx = Math.max(...ds.y.slice(0, cut));
+    const main = S.line('训练数据', ds.y.slice(100, cut).concat(new Array(h).fill(null)), { c: 0, w: 1.3 }); main.markLine = S.hline(mx, { label: '训练集见过的最大值' });
+    d.chart(0, { xAxis: { data: ds.dates.slice(100) }, yAxis: {}, series: [main, S.line('实际', pad.concat(ds.y.slice(cut)), { c: 0, op: 0.4 }), S.line('GBDT 预测', pad.concat(fc.map(v => +v.toFixed(1))), { c: 1, w: 2.5 })] });
+    const m = TS.metrics(ds.y.slice(cut), fc);
+    d.out(Site.tiles([['预测的最大值', Math.max(...fc), '训练集最大值 ' + Site.fmt(mx), Math.max(...fc) > mx * 1.05 ? 'good' : 'bad'], ['80 步预测 MAE', m.mae, '', s.rel ? 'good' : 'bad'], ['最后一步：预测 / 实际', Site.fmt(fc[h - 1]) + ' / ' + Site.fmt(ds.y[cut + h - 1])]]));
+  },
+});
+
+/* ---------- 多步策略 ---------- */
+Site.demo('ms-demo', {
+  controls: [{ k: 'metric', label: '纵轴', type: 'seg', options: [['abs', '平均绝对误差'], ['rel', '相对季节朴素（=1）']] }],
+  setup(s) {
+    const y = RT.y.slice(0, 1060), o = { h: 28, folds: 8, m: 7 }, gb = { nTrees: 120, lr: 0.08, maxDepth: 4, minLeaf: 8 };
+    const mk = cfg => (train, h, cut) => { const tr = ML.makeXY(RT, cfg, 0, cut); return ML.forecast(ML.gbdt(tr.X, tr.y, gb), RT, cfg, cut, h); };
+    const base = { dow: true, promo: true, holiday: true, log: true };
+    s.rec = TS.backtest(y, mk(Object.assign({ lags: [1, 7, 14, 28], roll: [7, 28] }, base)), o);
+    s.dir = TS.backtest(y, mk(Object.assign({ lags: [28, 35, 42, 56] }, base)), o);
+    s.sn = TS.backtest(y, (tr, h) => TS.fc.snaive(tr, h, 7), o);
+  },
+  render(s, d) {
+    const sm = a => a.map((_, i) => TS.mean(a.slice(Math.max(0, i - 1), i + 2))), rel = s.metric === 'rel';
+    const f = a => sm(a).map((v, i) => +(rel ? v / sm(s.sn.byH)[i] : v).toFixed(rel ? 3 : 1));
+    d.chart(0, { xAxis: { data: Array.from({ length: 28 }, (_, i) => '第' + (i + 1) + '天'), name: '提前多少天预测', nameLocation: 'middle', nameGap: 24 }, yAxis: { name: rel ? '倍' : 'MAE（件）' },
+      series: [S.line('递归法（滞后 1/7/14/28 + 滚动均值）', f(s.rec.byH), { c: 0, w: 2.5 }), S.line('直接法（只用 ≥28 天前的信息）', f(s.dir.byH), { c: 2, w: 2.5 }), S.line('季节朴素', f(s.sn.byH), { c: Site.pal().muted, dash: true })] });
+    const seg = (a, i0, i1) => TS.mean(a.slice(i0, i1));
+    d.out(Site.table(['方法', '第 1–7 天 MAE', '第 22–28 天 MAE', '28 天平均'], [
+      ['递归法', seg(s.rec.byH, 0, 7), seg(s.rec.byH, 21, 28), s.rec.avg.mae], ['直接法', seg(s.dir.byH, 0, 7), seg(s.dir.byH, 21, 28), s.dir.avg.mae], ['季节朴素', seg(s.sn.byH, 0, 7), seg(s.sn.byH, 21, 28), s.sn.avg.mae],
+    ], { num: [1, 2, 3] }));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '构造"过去 7 天销量均值"特征时写了 <code>y.rolling(7).mean()</code>，直接作为第 t 天的特征。问题在哪？', opts: ['窗口太短', '这个均值包含了第 t 天自己的销量，属于数据泄漏；应先 shift(1)', '应该用中位数', '没有问题'], ans: 1, why: 'rolling(7) 的窗口以当前行结尾，包含当天的值——也就是标签本身。必须先 shift(1) 让窗口止于昨天。' },
+  { q: '决策树选择切分点的标准是？', opts: ['让左右两侧的样本数相等', '让切分后左右两侧内部的方差之和尽可能小（方差减少量最大）', '随机选择', '选特征取值的中位数'], ans: 1, why: '回归树遍历所有候选切分，选择使"切后平方误差总和"下降最多的那个。' },
+  { q: '随机森林和 GBDT 最本质的区别是？', opts: ['随机森林用的是分类树，GBDT 用回归树', '随机森林并行地种相互独立的深树再取平均（降方差）；GBDT 串行地让每棵浅树拟合前面的残差（降偏差）', 'GBDT 不需要设置树的数量', '随机森林不能做回归'], ans: 1, why: '一个靠"平均独立的强学习器"降低方差，一个靠"逐步累加弱学习器"降低偏差。所以 GBDT 的树多了会过拟合、需要早停，随机森林不会。' },
+  { q: '用 GBDT 预测一个持续快速增长的指标，预测值总是卡在历史最高值附近上不去。原因和对策是？', opts: ['学习率太小，调大即可', '树模型的预测是叶子内训练样本的均值，无法超出训练范围；应改为预测增量/增长率，或先去趋势', '树太浅，加深即可', '数据太少'], ans: 1, why: '树只能内插，不能外推。把目标变成"相对变化"之后，它在任何水平上都有意义。' },
+  { q: 'GBDT 的学习率从 0.1 调到 0.01，通常还需要同时做什么？', opts: ['减少树的数量', '增加树的数量（并用早停确定具体数量）', '减小树的深度到 1', '关闭特征采样'], ans: 1, why: '学习率是每棵树的步长。步子小了，就要走更多步才能到同样的位置。小学习率 + 多棵树 + 早停通常泛化更好。' },
+]);
+</script>
+</body>
+</html>
