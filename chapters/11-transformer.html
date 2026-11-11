@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>11 注意力与 Transformer · 时间序列实验室</title>
+<link rel="stylesheet" href="../assets/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script>try{var t=localStorage.getItem('tsl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-ch="11">
+<main>
+<p class="lead">LSTM 靠"一步一步传话"来记住过去，传得再好也是接力。<strong>注意力机制</strong>换了一个思路：<strong>不传话了，需要哪一天的信息，就直接回头去看那一天</strong>。完全由注意力搭起来的网络就是 Transformer——大语言模型的基础，也是近几年时间序列预测模型和"时序大模型"的基础。这一章讲清注意力的原理、它用在时间序列上遇到的问题和解决办法（分块），以及什么时候才值得上深度学习。</p>
+
+<section id="why">
+<h2>LSTM 还有什么不够好</h2>
+<div class="cards">
+  <div class="card"><h4>信息要层层转手</h4><p>想用到 60 天前的信息，它得在细胞状态里"存活"60 步。门控让这成为可能，但仍然会损耗。</p></div>
+  <div class="card"><h4>没法并行</h4><p>第 t 步必须等第 t−1 步算完。序列一长，训练就慢，很难扩展到海量数据。</p></div>
+  <div class="card"><h4>看不出它在看哪</h4><p>所有历史被压进一个向量里，很难解释模型到底参考了哪些日子。</p></div>
+</div>
+<p>注意力机制同时解决了这三点：任意两个位置之间一步直达；所有位置可以同时计算；注意力权重本身就告诉你模型在看哪里。</p>
+</section>
+
+<section id="attn">
+<h2>注意力：按相似度加权平均</h2>
+<p>注意力只做一件事：<strong>拿着一个"问题"，去一堆"记录"里找最相关的几条，把它们的"内容"按相关程度加权平均。</strong>三个角色：</p>
+<div class="tw"><table>
+<thead><tr><th>角色</th><th>含义</th><th>在"预测明天销量"里</th></tr></thead>
+<tbody>
+<tr><td><strong>查询 Query</strong> $q$</td><td>我现在想找什么</td><td>最近 7 天的销量形状</td></tr>
+<tr><td><strong>键 Key</strong> $k_i$</td><td>每条记录的"索引标签"</td><td>历史上每一个 7 天窗口的形状</td></tr>
+<tr><td><strong>值 Value</strong> $v_i$</td><td>每条记录的"内容"</td><td>那个窗口之后的第二天发生了什么</td></tr>
+</tbody></table></div>
+$$\text{权重}\;\; w_i = \frac{\exp\big(\text{相似度}(q, k_i)/\tau\big)}{\sum_j \exp\big(\text{相似度}(q, k_j)/\tau\big)}\qquad\qquad \text{输出} = \sum_i w_i\, v_i$$
+<p>中间那一步叫 <strong>softmax</strong>：把一组相似度分数变成一组加起来等于 1 的正数权重。$\tau$ 是<strong>温度</strong>：温度低，权重集中在最相似的少数几条上；温度高，权重摊平，接近普通平均。Transformer 里的相似度用的是向量点积 $q\cdot k_i$，并除以 $\sqrt{d}$（向量维度的平方根）来控制尺度，所以叫"缩放点积注意力"。</p>
+<div class="demo" id="attn-demo">
+  <div class="demo-title">🧪 实验：用注意力做预测——模型在看历史上的哪些日子</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart-cap">销量历史（阴影 = 查询窗口，竖线 = 要预测的那一天）</div>
+    <div class="chart" data-h="210"></div>
+    <div class="chart-cap">注意力权重：预测时参考了历史上每一天的多少</div>
+    <div class="chart" data-h="170"></div>
+    <div class="readout"></div>
+    <p class="hint">这是一个没有任何可训练参数的"纯注意力"预测器：找出历史上和"最近这一周"形状最像的那些周，看它们的下一天是什么样，加权平均。① 温度调低：权重集中成几根尖刺，而且<strong>几乎都落在和目标日同一个星期几的日子上</strong>——注意力自己"发现"了周季节；② 温度调高：权重摊平到所有日子，预测退化成"最近的平均水平"；③ 拖动"预测哪一天"，看尖刺如何跟着移动。真正的 Transformer 和它的区别只是：相似度怎么算（Q、K、V 各经过一个可学习的线性变换）是从数据里学出来的。</p>
+  </div>
+</div>
+</section>
+
+<section id="self">
+<h2>自注意力：让序列里的每个位置互相看</h2>
+<p>上面是"拿最后一段去查历史"。<strong>自注意力</strong>更进一步：让输入序列里的<strong>每一个位置</strong>都作为查询，去看序列里的所有位置，得到一个融合了上下文的新表示。$L$ 个位置两两之间的权重排成一个 $L\times L$ 的<strong>注意力矩阵</strong>：第 $i$ 行表示"位置 $i$ 在更新自己时，从其他各个位置各取了多少"。</p>
+$$\text{Attention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d}}\right)V,\qquad Q = XW_Q,\;\; K = XW_K,\;\; V = XW_V$$
+<p>$X$ 是输入（每行一个位置的向量），$W_Q, W_K, W_V$ 是三个可学习的矩阵——模型通过它们学会"什么样的两个位置算相关"。</p>
+<div class="demo" id="self-demo">
+  <div class="demo-title">🧪 实验：28 天销量的自注意力矩阵</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="340"></div>
+    <div class="readout"></div>
+    <p class="hint">横轴和纵轴都是这 28 天；颜色越深表示注意力越大。切换"按什么算相似"：<strong>数值相近</strong>——销量水平接近的日子互相关注（周末看周末）；<strong>位置相邻</strong>——只看自己附近几天，矩阵是一条沿对角线的带子，相当于一个局部平滑；<strong>星期相同</strong>——出现间隔为 7 的平行条纹。真实的 Transformer 有多个<strong>注意力头</strong>，每个头学一种不同的"相关"，就像这三张图同时存在。</p>
+  </div>
+</div>
+
+<h3>位置编码：告诉模型"谁在前谁在后"</h3>
+<p>注意力只看内容相似度，对顺序是"脸盲"的：把输入打乱，它算出的结果只是跟着打乱而已。而时间序列的顺序恰恰是全部信息所在。所以必须给每个位置加上一个表示"我在第几位"的向量——<strong>位置编码</strong>。经典做法是用不同频率的正弦和余弦：</p>
+$$PE_{(pos,\,2i)} = \sin\!\Big(\frac{pos}{10000^{2i/d}}\Big),\qquad PE_{(pos,\,2i+1)} = \cos\!\Big(\frac{pos}{10000^{2i/d}}\Big)$$
+<div class="demo" id="pe-demo">
+  <div class="demo-title">🧪 实验：位置编码长什么样</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="260"></div>
+    <p class="hint">每一列是一个位置的编码向量。上面几行（低维度）变化很快，能区分相邻的位置；下面几行变化很慢，能区分相距很远的位置。合在一起，每个位置都有一个独一无二的"条形码"。时间序列模型里也常用可学习的位置编码，或者直接把日历信息（星期几、几月、几点）编码进去。</p>
+  </div>
+</div>
+</section>
+
+<section id="transformer">
+<h2>Transformer：把注意力搭成网络</h2>
+<svg class="diagram" viewBox="0 0 720 170" role="img" aria-label="Transformer 编码器结构：输入嵌入加位置编码，经过若干层（多头自注意力、残差与归一化、前馈网络、残差与归一化），最后接输出头">
+  <g class="d-t" text-anchor="middle">
+    <rect class="d-box" x="6" y="62" width="78" height="46" rx="8"/><text x="45" y="82">历史窗口</text><text class="d-m" x="45" y="98">L 个时间点</text>
+    <rect class="d-box" x="108" y="62" width="88" height="46" rx="8"/><text x="152" y="82">嵌入</text><text class="d-m" x="152" y="98">+ 位置编码</text>
+    <rect x="218" y="26" width="376" height="118" rx="12" class="d-box" style="fill:none;stroke-dasharray:4 4"/>
+    <text class="d-m" x="406" y="44">一层编码器（重复 N 次）</text>
+    <rect class="d-acc" x="230" y="62" width="92" height="46" rx="8"/><text x="276" y="82">多头</text><text x="276" y="98">自注意力</text>
+    <rect class="d-box" x="336" y="62" width="70" height="46" rx="8"/><text x="371" y="82">残差</text><text class="d-m" x="371" y="98">+ 归一化</text>
+    <rect class="d-acc" x="420" y="62" width="80" height="46" rx="8"/><text x="460" y="82">前馈网络</text><text class="d-m" x="460" y="98">逐位置 MLP</text>
+    <rect class="d-box" x="514" y="62" width="70" height="46" rx="8"/><text x="549" y="82">残差</text><text class="d-m" x="549" y="98">+ 归一化</text>
+    <rect class="d-box" x="616" y="62" width="98" height="46" rx="8"/><text x="665" y="82">输出头</text><text class="d-m" x="665" y="98">→ 未来 h 步</text>
+  </g>
+  <g class="d-ln"><path d="M84 85H106M196 85H228M322 85H334M406 85H418M500 85H512M584 85H614"/><path d="M222 85V128H371V110" stroke-dasharray="3 3"/><path d="M412 85V136H549V110" stroke-dasharray="3 3"/></g>
+  <text class="d-m" x="296" y="160" text-anchor="middle">虚线 = 残差连接（把输入直接加到输出上）</text>
+</svg>
+<p>点击每个部件看它的作用：</p>
+<div id="flow"></div>
+<div class="callout key"><div class="hd">和 LSTM 的对比</div>
+<div class="tw" style="margin:8px 0 0"><table>
+<thead><tr><th></th><th>LSTM</th><th>Transformer</th></tr></thead>
+<tbody>
+<tr><td>怎么利用历史</td><td>按顺序读，信息存在状态里一步步传</td><td>任意两个位置直接相连</td></tr>
+<tr><td>顺序信息</td><td>天然具备</td><td>需要位置编码</td></tr>
+<tr><td>并行训练</td><td>不能</td><td>可以（适合大数据、大模型）</td></tr>
+<tr><td>计算量随窗口长度 L</td><td>正比于 L</td><td>正比于 L²（每两个位置都要算一次）</td></tr>
+<tr><td>数据需求</td><td>中等</td><td>大——约束更少，数据少时更容易过拟合</td></tr>
+</tbody></table></div></div>
+</section>
+
+<section id="problems">
+<h2>把 Transformer 直接搬到时间序列上，会遇到什么</h2>
+<p>Transformer 在语言上大获成功之后，研究者很自然地把它用到了时间序列上（Informer、Autoformer 等一系列模型）。但时间序列和语言有三个关键差别：</p>
+<div class="tw"><table>
+<thead><tr><th>差别</th><th>后果</th></tr></thead>
+<tbody>
+<tr><td><strong>一个时间点 ≠ 一个词</strong>：单独一个"周二销量 1340"几乎没有语义，信息在<em>一段</em>的形状里</td><td>逐点做注意力，是在比较没什么意义的单个数值</td></tr>
+<tr><td><strong>序列很长</strong>：要覆盖年季节，日数据需要几百个点，小时数据上千个</td><td>$L^2$ 的计算量和内存吃不消</td></tr>
+<tr><td><strong>数据少、噪声大</strong>：一条序列几百上千个点，远不如文本语料丰富</td><td>大模型很容易过拟合</td></tr>
+</tbody></table></div>
+<div class="callout warn"><div class="hd">⚠️ 一个著名的"打脸"实验</div>
+<p>2022 年的论文《Are Transformers Effective for Time Series Forecasting?》提出了 <strong>DLinear</strong>：把序列分解成趋势和季节两部分，各接<strong>一层线性回归</strong>，没有注意力、没有非线性。结果在当时主流的长期预测基准上，它超过了多个结构复杂的 Transformer 变体。这篇文章的价值不在于"线性模型最好"，而在于提醒大家：<strong>时间序列预测里，复杂模型必须和简单基线同台比较</strong>——这正是本教程从第 05 章起一直强调的事。</p></div>
+</section>
+
+<section id="patch">
+<h2>分块（Patching）：PatchTST 的思路</h2>
+<p>2023 年的 <strong>PatchTST</strong> 给出了一个简单有效的回应，核心就两点：</p>
+<ol>
+  <li><strong>分块</strong>：不把单个时间点当作 token，而是把序列切成一段一段的<strong>小块</strong>（比如每 16 个点一块），每个块经过一个线性层变成一个 token。这和视觉 Transformer 把图片切成小方块是同一个想法。</li>
+  <li><strong>通道独立</strong>：多变量序列的每个变量单独过同一个模型（共享权重），而不是在一开始就混在一起。</li>
+</ol>
+<p>分块一举解决了前面的两个问题：每个 token 是"一段形状"，有了语义；token 数量减少为原来的几分之一，注意力的计算量按平方下降，于是可以看更长的历史。</p>
+<div class="demo" id="patch-demo">
+  <div class="demo-title">🧪 实验：分块如何改变 token 数和计算量</div>
+  <div class="demo-body">
+    <div class="ctl"></div>
+    <div class="chart" data-h="250"></div>
+    <div class="readout"></div>
+    <p class="hint">数据是电力小时负荷。块长设为 24：每个 token 恰好是一整天的负荷曲线——模型比较的是"这一天的形状"和"那一天的形状"，比比较两个单独的小时有意义得多。把块长调回 1（逐点），token 数等于窗口长度，注意力要计算的"位置对"数量暴涨。相邻块之间留一些重叠（步长小于块长）可以避免规律被切断在块的边界上。</p>
+  </div>
+</div>
+</section>
+
+<section id="foundation">
+<h2>时序大模型：预训练一次，到处零样本预测</h2>
+<p>语言模型的路线是"在海量文本上预训练一个大模型，然后直接拿来用"。2023 年起，同样的思路被搬到了时间序列上：在<strong>几十亿到上千亿个时间点</strong>（各行各业的公开数据加上合成数据）上预训练一个 Transformer，拿到一条它从没见过的新序列，<strong>不做任何训练就直接预测</strong>——这叫<strong>零样本</strong>（zero-shot）预测。</p>
+<div class="tw"><table>
+<thead><tr><th>模型</th><th>来自</th><th>核心做法</th></tr></thead>
+<tbody>
+<tr><td><strong>Chronos</strong></td><td>Amazon</td><td>把数值缩放后<strong>量化成离散的"词"</strong>，直接用语言模型的架构（T5）来训练；通过采样得到概率预测。后续的 Bolt 版本改用分块，速度快很多</td></tr>
+<tr><td><strong>TimesFM</strong></td><td>Google</td><td>分块 + 只有解码器的 Transformer（类似 GPT），直接输出未来一段</td></tr>
+<tr><td><strong>Moirai</strong></td><td>Salesforce</td><td>支持任意数量的变量和多种频率，输出灵活的概率分布</td></tr>
+<tr><td><strong>Lag-Llama</strong></td><td>学术界开源</td><td>用滞后值作为输入特征的解码器模型，概率预测</td></tr>
+<tr><td><strong>TimeGPT</strong></td><td>Nixtla</td><td>闭源，通过 API 调用</td></tr>
+</tbody></table></div>
+<div class="cards">
+  <div class="card"><h4>✅ 好处</h4><p>不用训练、不用调参，几行代码出结果；对短序列、冷启动的新品尤其有用（传统方法没法训练）；自带概率预测。</p></div>
+  <div class="card"><h4>⚠️ 局限</h4><p>不了解你的业务：不知道促销计划、节假日安排（部分模型开始支持协变量）；在特定领域的数据上，认真调过的 GBDT 或统计模型常常仍然更准；模型大，推理成本高。</p></div>
+  <div class="card"><h4>🧭 怎么用</h4><p>把它当作一个<strong>很强的、零成本的基线</strong>加入回测；数据很少时作为主力；也可以在自己的数据上微调。</p></div>
+</div>
+</section>
+
+<section id="others">
+<h2>其他常听到的名字</h2>
+<p>下面这些模型你会在论文、库和面试里碰到。知道它们各自的定位即可，原理都建立在前面讲过的零件之上。</p>
+<div class="tw"><table>
+<thead><tr><th>名字</th><th>一句话定位</th></tr></thead>
+<tbody>
+<tr><td><strong>GRU</strong></td><td>LSTM 的简化版（两个门、没有单独的细胞状态），更轻更快，效果相近</td></tr>
+<tr><td><strong>TCN</strong></td><td>时间卷积网络：用"因果 + 膨胀"的一维卷积看历史，可并行，适合很长的高频序列</td></tr>
+<tr><td><strong>DeepAR</strong></td><td>LSTM + 多序列全局训练 + 输出概率分布。电商、零售行业的常用概率预测模型</td></tr>
+<tr><td><strong>N-BEATS / N-HiTS</strong></td><td>纯全连接的深层残差网络，逐层"解释掉"一部分序列；不用 RNN 也不用注意力，单变量预测很强</td></tr>
+<tr><td><strong>TFT</strong></td><td>时间融合 Transformer：LSTM + 注意力 + 变量选择，专门处理"静态属性、历史协变量、未来已知协变量"的混合输入，并给出可解释的变量重要性。业务预测里用得很多</td></tr>
+<tr><td><strong>DLinear / NLinear</strong></td><td>分解 + 一层线性模型。极简但很强的基线，做长期预测必须对比</td></tr>
+<tr><td><strong>Informer / Autoformer</strong></td><td>早期的长序列 Transformer 变体，主要在降低注意力的计算量上做文章</td></tr>
+<tr><td><strong>iTransformer</strong></td><td>把每个<em>变量</em>（而不是每个时间点）当作一个 token，用注意力建模变量之间的关系</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="when">
+<h2>什么时候才值得上深度学习</h2>
+<div class="tw"><table>
+<thead><tr><th>你的情况</th><th>建议</th></tr></thead>
+<tbody>
+<tr><td>一条或几条序列，每条几百上千个点</td><td><strong>不要</strong>从深度学习开始。ETS / ARIMA / GBDT 更准、更快、更好解释</td></tr>
+<tr><td>几百到几万条相关序列，有协变量</td><td>全局 GBDT 是首选基线；DeepAR / TFT / PatchTST 值得放进回测对比</td></tr>
+<tr><td>海量序列（十万级以上）、高频数据、复杂的跨序列关系</td><td>深度学习开始显出优势</td></tr>
+<tr><td>新品、新店，历史极短</td><td>全局模型（靠属性特征）或时序大模型的零样本预测</td></tr>
+<tr><td>需要完整的概率分布</td><td>DeepAR、分位数回归的 GBDT、时序大模型</td></tr>
+<tr><td>需要向业务方解释每个预测</td><td>统计模型或 GBDT + 特征重要性；深度模型里 TFT 的可解释性相对较好</td></tr>
+</tbody></table></div>
+<div class="callout tip"><div class="hd">💡 一条贯穿始终的原则</div>
+<p>不要因为模型"先进"而选它。<strong>把候选模型和简单基线放进同一套滚动回测</strong>（第 05 章），用贴合业务代价的指标比较，再考虑训练成本、维护成本和可解释性。下一章的模型竞技场就是这么做的。</p></div>
+<details class="code" open><summary>Python 参考代码：PatchTST 训练，以及时序大模型的零样本预测</summary>
+<pre><code># ---------- PatchTST / TFT / DLinear：用 neuralforecast 一次比完 ----------
+from neuralforecast import NeuralForecast
+from neuralforecast.models import PatchTST, DLinear, TFT
+
+H = 28
+nf = NeuralForecast(
+    models=[
+        PatchTST(h=H, input_size=4 * H, patch_len=16, stride=8, max_steps=1000),
+        DLinear(h=H, input_size=4 * H, max_steps=1000),                 # 必须带上的简单基线
+        TFT(h=H, input_size=4 * H, hidden_size=32, max_steps=1000,
+            futr_exog_list=["promo", "is_holiday"]),                    # 未来已知的协变量
+    ],
+    freq="D",
+)
+# long_df：长表格式 [unique_id, ds, y, promo, is_holiday]，多条序列堆在一起做全局训练
+cv = nf.cross_validation(df=long_df, n_windows=6, step_size=H)          # 滚动回测
+print(cv.groupby("unique_id")[["PatchTST", "DLinear", "TFT"]].apply(lambda g: (g.sub(cv.loc[g.index, "y"], axis=0)).abs().mean()))
+
+# ---------- 时序大模型：零样本预测（不训练） ----------
+# pip install chronos-forecasting      具体接口以官方文档为准
+import numpy as np, torch
+from chronos import ChronosPipeline
+
+pipe = ChronosPipeline.from_pretrained("amazon/chronos-t5-small", device_map="cpu", torch_dtype=torch.float32)
+samples = pipe.predict(torch.tensor(y_hist, dtype=torch.float32), prediction_length=28, num_samples=50)
+low, median, high = np.quantile(samples[0].numpy(), [0.1, 0.5, 0.9], axis=0)   # 概率预测
+
+# 用法建议：把它作为一个候选模型加入你的回测，而不是直接上线
+# 其他：TimesFM（pip install timesfm）、Moirai（uni2ts）、TimeGPT（nixtla，API 调用）</code></pre></details>
+</section>
+
+<section id="summary">
+<h2>本章要点与小测验</h2>
+<div class="callout key">
+<ul>
+  <li>注意力 = 用查询去和所有键比相似度，softmax 成权重，对值加权平均；任意两个位置一步直达。</li>
+  <li>自注意力让序列里每个位置都去看所有位置；多头 = 同时学多种"相关"。</li>
+  <li>注意力不知道顺序，必须加位置编码。</li>
+  <li>Transformer = 自注意力 + 前馈网络 + 残差与归一化，多层堆叠；计算量随长度平方增长。</li>
+  <li>时间序列的单个点语义弱 → 分块（PatchTST）：一段作为一个 token，既有语义又省计算。</li>
+  <li>时序大模型在海量数据上预训练，可零样本预测，适合做强基线和冷启动。</li>
+  <li>简单模型（DLinear、ETS、GBDT）常常很强——任何深度模型都要先和它们比。</li>
+</ul>
+</div>
+<div id="quiz"></div>
+</section>
+</main>
+
+<script src="../assets/vendor/echarts.min.js"></script>
+<script src="../assets/vendor/katex/katex.min.js"></script>
+<script src="../assets/vendor/katex/auto-render.min.js"></script>
+<script src="../assets/js/tslib.js"></script>
+<script src="../assets/js/site.js"></script>
+<script>
+const { S } = Site;
+const RT = TS.data.retail(), LY = RT.y.map(Math.log), CUT = 976;
+const softmax = a => { const m = Math.max(...a), e = a.map(v => Math.exp(v - m)), s = TS.sum(e); return e.map(v => v / s); };
+
+/* ---------- 注意力预测器 ---------- */
+function attend(t, L, tau, span) { // 预测第 t 天：查询 = [t-L, t) 的形状；键 = 历史各窗口；值 = 窗口后一天相对窗口水平的偏离
+  const lvl = i => { let s = 0; for (let k = i - L; k < i; k++) s += LY[k]; return s / L; };
+  const ql = lvl(t), idx = [], score = [], val = [];
+  for (let i = t - span; i < t; i++) {
+    const kl = lvl(i); let d = 0;
+    for (let k = 0; k < L; k++) d += ((LY[t - L + k] - ql) - (LY[i - L + k] - kl)) ** 2;
+    idx.push(i); score.push(-d / L / tau); val.push(LY[i] - kl);
+  }
+  const w = softmax(score);
+  return { idx, w, pred: Math.exp(ql + TS.sum(w.map((v, j) => v * val[j]))) };
+}
+Site.demo('attn-demo', {
+  controls: [
+    { k: 'tau', label: '温度 τ', min: 1, max: 60, step: 1, value: 4, fmt: v => (v / 1000).toFixed(3) },
+    { k: 'L', label: '查询窗口长度', type: 'seg', options: [[7, '7 天'], [14, '14 天']] },
+    { k: 'day', label: '预测哪一天', min: 0, max: 27, step: 1, value: 5, fmt: v => RT.dates[CUT + v].slice(5) + ' ' + TS.DOW[TS.dow(RT.dates[CUT + v])] },
+  ],
+  render(s, d) {
+    const t = CUT + s.day, span = 364, tau = s.tau / 1000, A = attend(t, s.L, tau, span), p = Site.pal(), v0 = t - 126, x = RT.dates.slice(v0, t + 1);
+    const line = S.line('销量', RT.y.slice(v0, t).concat([null]), { c: 0, w: 1.4 });
+    line.markArea = S.areas([[RT.dates[t - s.L], RT.dates[t - 1], '查询', 1]]); line.markLine = S.vline(RT.dates[t], { label: '预测这一天', c: p.s[1] });
+    d.chart(0, { xAxis: { data: x }, yAxis: { name: '件' }, legend: false, series: [line, S.scatter('实际', [[x.length - 1, RT.y[t]]], { c: 0, size: 9 }), S.scatter('预测', [[x.length - 1, Math.round(A.pred)]], { c: 1, size: 9, x: { symbol: 'diamond' } })] });
+    const wAll = new Array(x.length).fill(0); A.idx.forEach((i, j) => { if (i >= v0) wAll[i - v0] = +(A.w[j] * 100).toFixed(2); });
+    const dw = TS.dow(RT.dates[t]);
+    d.chart(1, { xAxis: { data: x }, yAxis: { name: '权重 %', scale: false }, legend: false,
+      series: [{ type: 'bar', name: '注意力权重', barMaxWidth: 8, data: wAll.map((v, k) => ({ value: v, itemStyle: { color: TS.dow(x[k]) === dw ? p.s[1] : p.s[0], opacity: TS.dow(x[k]) === dw ? 1 : 0.5 } })) }] });
+    const same = TS.sum(A.w.filter((_, j) => TS.dow(RT.dates[A.idx[j]]) === dw)), eff = 1 / TS.sum(A.w.map(v => v * v));
+    const preds = [], sn = []; for (let k = 0; k < 28; k++) { preds.push(attend(CUT + k, s.L, tau, span).pred); sn.push(RT.y[CUT + k - 7]); }
+    const actual = RT.y.slice(CUT, CUT + 28), m = TS.metrics(actual, preds), m0 = TS.metrics(actual, sn);
+    d.out(Site.tiles([
+      ['预测 / 实际', Math.round(A.pred) + ' / ' + RT.y[t], '件'],
+      ['落在"同一个星期几"上的权重', Site.pct(same, 0), '橙色柱子；随机情况下约 14%', same > 0.5 ? 'good' : ''],
+      ['相当于参考了多少天', eff.toFixed(0) + ' 天', '共 ' + span + ' 天可选；越小越集中'],
+      ['28 天逐日预测的 MAE', m.mae, '季节朴素 ' + Site.fmt(m0.mae), m.mae < m0.mae ? 'good' : ''],
+    ]));
+  },
+});
+
+/* ---------- 自注意力矩阵 ---------- */
+Site.demo('self-demo', {
+  controls: [
+    { k: 'emb', label: '按什么算相似', type: 'seg', options: [['val', '数值相近'], ['near', '位置相邻'], ['week', '星期相同']] },
+    { k: 'tau', label: '温度', min: 1, max: 30, step: 1, value: 6, fmt: v => (v / 10).toFixed(1) },
+  ],
+  render(s, d) {
+    const n = 28, a = CUT - n, sc = TS.std(LY.slice(a, CUT)), mu = TS.mean(LY.slice(a, CUT)), p = Site.pal(), tau = s.tau / 10;
+    const emb = i => s.emb === 'val' ? [(LY[a + i] - mu) / sc] : s.emb === 'near' ? [i / 3] : [1.6 * Math.sin(2 * Math.PI * i / 7), 1.6 * Math.cos(2 * Math.PI * i / 7)];
+    const E = Array.from({ length: n }, (_, i) => emb(i)), cells = []; let mx = 0;
+    for (let i = 0; i < n; i++) { const w = softmax(E.map(e => -e.reduce((q, v, k) => q + (v - E[i][k]) ** 2, 0) / tau)); w.forEach((v, j) => { cells.push([j, i, +(v * 100).toFixed(1)]); mx = Math.max(mx, v * 100); }); }
+    const lab = Array.from({ length: n }, (_, i) => RT.dates[a + i].slice(5) + TS.DOW[TS.dow(RT.dates[a + i])].slice(1));
+    d.chart(0, { xAxis: { type: 'category', data: lab, name: '被关注的日子', nameLocation: 'middle', nameGap: 26, axisLabel: { fontSize: 9, interval: 6 }, splitLine: { show: false } }, yAxis: { type: 'category', data: lab, inverse: true, name: '发出查询的日子', axisLabel: { fontSize: 9, interval: 6 }, splitLine: { show: false } }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `${lab[q.value[1]]} 关注 ${lab[q.value[0]]}：<b>${q.value[2]}%</b>` },
+      visualMap: { show: false, min: 0, max: mx, dimension: 2, inRange: { color: p.seq } }, grid: { left: 6, right: 10, top: 10, bottom: 30 },
+      series: [{ type: 'heatmap', name: '注意力', data: cells }] });
+    const row = cells.filter(c => c[1] === n - 1).sort((u, v) => v[2] - u[2]).slice(0, 4);
+    d.out(`<span class="tag">最后一天（${lab[n - 1]}）最关注：${row.map(c => lab[c[0]] + ' ' + c[2] + '%').join('、')}</span>`);
+  },
+});
+
+/* ---------- 位置编码 ---------- */
+Site.demo('pe-demo', {
+  controls: [{ k: 'dm', label: '编码维度 d', min: 8, max: 32, step: 4, value: 16 }],
+  render(s, d) {
+    const P = 60, cells = [], p = Site.pal();
+    for (let pos = 0; pos < P; pos++) for (let i = 0; i < s.dm; i++) { const ang = pos / Math.pow(10000, 2 * Math.floor(i / 2) / s.dm); cells.push([pos, i, +(i % 2 ? Math.cos(ang) : Math.sin(ang)).toFixed(2)]); }
+    d.chart(0, { xAxis: { type: 'category', data: Array.from({ length: P }, (_, i) => i), name: '位置（第几个时间步）', nameLocation: 'middle', nameGap: 24, splitLine: { show: false } }, yAxis: { type: 'category', data: Array.from({ length: s.dm }, (_, i) => '维度' + i), inverse: true, splitLine: { show: false }, axisLabel: { fontSize: 10 } }, legend: false,
+      tooltip: { trigger: 'item', formatter: q => `位置 ${q.value[0]}，维度 ${q.value[1]}：<b>${q.value[2]}</b>` },
+      visualMap: { show: false, min: -1, max: 1, dimension: 2, inRange: { color: p.div } }, grid: { left: 6, right: 10, top: 8, bottom: 28 },
+      series: [{ type: 'heatmap', name: '位置编码', data: cells }] });
+  },
+});
+
+/* ---------- Transformer 部件 ---------- */
+Site.flow('flow', [
+  { t: '嵌入', d: '<p>把每个输入单元（一个时间点或一个小块）通过线性层映射成一个 d 维向量（如 d = 64）。协变量（促销、星期）也在这里并入。之后网络里流动的都是这种 d 维向量，每个位置一个。</p>' },
+  { t: '位置编码', d: '<p>给每个位置的向量加上一个表示"第几位"的向量。没有它，模型分不清顺序。</p>' },
+  { t: '多头自注意力', d: '<p>每个位置去看所有位置，按相关程度汇总信息。<strong>多头</strong>：把向量分成几组（如 4 个头），每组各做一次注意力，各学一种"相关"——有的头关注上周同一天，有的头关注最近几天，有的头关注促销日。最后拼起来。</p>' },
+  { t: '残差 + 归一化', d: '<p><strong>残差连接</strong>：输出 = 输入 + 子层的结果。和 LSTM 的细胞状态一个道理——给梯度留一条直通的路，网络才能叠得很深。<strong>层归一化</strong>：把每个位置的向量重新缩放到稳定的尺度，让训练更平稳。</p>' },
+  { t: '前馈网络', d: '<p>对每个位置的向量<em>各自</em>过一个两层的小 MLP（第 09 章）。注意力负责"在位置之间搬运信息"，前馈网络负责"在每个位置上加工信息"。</p>' },
+  { t: '堆叠 N 层', d: '<p>把"注意力 → 前馈"重复 N 次（时间序列里常用 2–4 层）。浅层捕捉局部形状，深层组合出更长程的规律。</p>' },
+  { t: '输出头', d: '<p>时间序列预测常用最简单的做法：把所有位置的向量摊平，接一个线性层，<strong>一次输出未来 h 步</strong>。早期模型用"编码器-解码器"逐步生成未来；后来发现直接多步输出又快又不容易累积误差。预测时还要保证<strong>不偷看未来</strong>：解码器式的模型用"因果掩码"遮住每个位置之后的内容。</p>' },
+], 2);
+
+/* ---------- 分块 ---------- */
+Site.demo('patch-demo', {
+  controls: [
+    { k: 'L', label: '回看窗口长度 L', min: 96, max: 672, step: 24, value: 168, fmt: v => v + ' 小时（' + v / 24 + ' 天）' },
+    { k: 'P', label: '块长 P', type: 'seg', options: [[1, '1（逐点）'], [8, '8'], [24, '24'], [48, '48']], value: 24 },
+    { k: 'ov', label: '相邻块重叠一半（步长 = P/2）', type: 'check', value: false },
+  ],
+  render(s, d) {
+    const ds = TS.data.load(), n = ds.y.length, a = n - s.L, st = s.ov && s.P > 1 ? s.P / 2 : s.P, N = Math.floor((s.L - s.P) / st) + 1, p = Site.pal();
+    const line = S.line('负荷', ds.y.slice(a), { c: 0, w: 1.3 });
+    if (N <= 90 && s.P > 1) line.markArea = { silent: true, data: Array.from({ length: N }, (_, k) => k).filter(k => k % 2 === 0).map(k => [{ xAxis: ds.dates[a + k * st], itemStyle: { color: p.s[0], opacity: 0.13 } }, { xAxis: ds.dates[Math.min(n - 1, a + k * st + s.P - 1)] }]) };
+    d.chart(0, { xAxis: { data: ds.dates.slice(a) }, yAxis: { name: 'MW' }, legend: false, series: [line] });
+    d.out(Site.tiles([
+      ['token 数量', N, s.P > 1 ? '每个 token 是 ' + s.P + ' 小时的一段' : '每个 token 只是一个数'],
+      ['注意力要算的位置对', Site.fmt(N * N, 0), 'token 数的平方'],
+      ['相比逐点', (s.L * s.L / (N * N)).toFixed(0) + ' 倍', '计算量和内存的节省', s.P > 1 ? 'good' : 'bad'],
+      ['同样的计算量能看多远', Site.fmt(Math.round(s.L * Math.sqrt(s.L * s.L / (N * N)) / 24), 0) + ' 天', '逐点只能看 ' + s.L / 24 + ' 天'],
+    ]));
+  },
+});
+
+Site.quiz('quiz', [
+  { q: '注意力机制里"温度"调得很高时，注意力权重会怎样？', opts: ['集中在最相似的一个位置上', '趋于均匀，输出接近所有值的简单平均', '全部变成 0', '变成负数'], ans: 1, why: '相似度除以一个很大的数后彼此差别很小，softmax 的结果接近均匀分布。温度低则相反，权重集中在少数最相似的位置。' },
+  { q: '为什么 Transformer 必须使用位置编码？', opts: ['为了加快训练速度', '注意力只根据内容算相似度，本身不知道各位置的先后顺序', '为了减少参数量', '为了让输出落在 0 到 1 之间'], ans: 1, why: '自注意力对输入的排列顺序不敏感。时间序列的顺序至关重要，必须通过位置编码显式告诉模型。' },
+  { q: 'PatchTST 把序列切成小块作为 token，主要解决了什么问题？', opts: ['让模型可以处理缺失值', '单个时间点语义太弱，以及逐点注意力的计算量随长度平方增长', '让模型不需要标准化', '让模型可以外推趋势'], ans: 1, why: '一个块是一段有形状的子序列，比单个数值有意义；token 数减少后，注意力的 O(N²) 开销大幅下降，可以看更长的历史。' },
+  { q: 'DLinear 那篇论文给时间序列预测带来的最重要的启示是？', opts: ['线性模型永远是最好的', 'Transformer 不能用于时间序列', '复杂模型必须和足够强的简单基线在同样的评估方式下比较', '应该停止研究深度学习预测'], ans: 2, why: '一层线性模型在当时的基准上超过了多个复杂的 Transformer 变体，说明此前的对比缺少强基线。之后的 PatchTST 等正是在更严格的对比下提出的。' },
+  { q: '公司刚上线一个新品，只有 3 周的销售数据，需要预测未来 4 周。下面哪种做法最合理？', opts: ['用这 3 周数据从头训练一个 Transformer', '用 ARIMA，因为它最经典', '用在大量其他商品上训练的全局模型（靠品类等属性），或用时序大模型做零样本预测，并与简单基线对比', '无法预测，等数据足够再说'], ans: 2, why: '21 个点不足以训练任何单序列模型。冷启动正是全局模型和预训练大模型的用武之地：它们带着从其他序列学到的规律来。' },
+]);
+</script>
+</body>
+</html>
